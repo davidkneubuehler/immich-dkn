@@ -69,7 +69,13 @@
 </script>
 
 {#if menuItem}
-  <MenuOption {text} {icon} {onClick} />
+  <MenuOption
+    {text}
+    {icon}
+    subtitle={assetMultiSelectManager.selectWholeStack ? $t('whole_stack_selection_action_unavailable') : ''}
+    disabled={assetMultiSelectManager.selectWholeStack}
+    {onClick}
+  />
 {/if}
 
 {#if !menuItem}
@@ -83,6 +89,14 @@
       onclick={() => {}}
     />
   {:else}
-    <IconButton shape="round" color="secondary" variant="ghost" aria-label={text} {icon} onclick={onClick} />
+    <IconButton
+      shape="round"
+      color="secondary"
+      variant="ghost"
+      aria-label={text}
+      {icon}
+      disabled={assetMultiSelectManager.selectWholeStack}
+      onclick={onClick}
+    />
   {/if}
 {/if}

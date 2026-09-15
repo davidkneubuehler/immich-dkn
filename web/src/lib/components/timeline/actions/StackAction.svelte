@@ -39,7 +39,19 @@
 </script>
 
 {#if unstack}
-  <MenuOption text={$t('unstack')} icon={mdiImageOffOutline} onClick={handleUnstack} />
+  <MenuOption
+    text={$t('unstack')}
+    subtitle={assetMultiSelectManager.selectWholeStack ? $t('whole_stack_selection_action_unavailable') : ''}
+    icon={mdiImageOffOutline}
+    disabled={assetMultiSelectManager.selectWholeStack}
+    onClick={handleUnstack}
+  />
 {:else}
-  <MenuOption text={$t('stack')} icon={mdiImageMultipleOutline} onClick={handleStack} />
+  <MenuOption
+    text={$t('stack')}
+    subtitle={assetMultiSelectManager.selectWholeStack ? $t('whole_stack_selection_action_unavailable') : ''}
+    icon={mdiImageMultipleOutline}
+    disabled={assetMultiSelectManager.selectWholeStack}
+    onClick={handleStack}
+  />
 {/if}
