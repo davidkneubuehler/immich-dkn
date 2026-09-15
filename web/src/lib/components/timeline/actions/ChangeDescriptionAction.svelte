@@ -5,7 +5,7 @@
   import { getOwnedAssetsWithWarning } from '$lib/utils/asset-utils';
   import { handleError } from '$lib/utils/handle-error';
   import { updateAssets } from '@immich/sdk';
-  import { modalManager } from '@immich/ui';
+  import { modalManager, toastManager } from '@immich/ui';
   import { mdiText } from '@mdi/js';
   import { t } from 'svelte-i18n';
   import MenuOption from '../../shared-components/context-menu/MenuOption.svelte';
@@ -17,9 +17,14 @@
   let { menuItem = false }: Props = $props();
 
   const handleUpdateDescription = async () => {
+    const assets = await assetMultiSelectManager.getAssetsForAction();
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
     const description = await modalManager.show(AssetUpdateDescriptionConfirmModal);
     if (description) {
-      const ids = getOwnedAssetsWithWarning(assetMultiSelectManager.assets, authManager.user);
+      const ids = getOwnedAssetsWithWarning(assets, authManager.user);
 
       try {
         await updateAssets({ assetBulkUpdateDto: { ids, description } });

@@ -17,12 +17,17 @@
   let { menuItem = false }: Props = $props();
 
   const onAction = async () => {
+    const assets = await assetMultiSelectManager.getAssetsForAction();
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
     const point = await modalManager.show(GeolocationPointPickerModal, {});
     if (!point) {
       return;
     }
 
-    const ids = getOwnedAssetsWithWarning(assetMultiSelectManager.assets, authManager.user);
+    const ids = getOwnedAssetsWithWarning(assets, authManager.user);
 
     try {
       await updateAssets({ assetBulkUpdateDto: { ids, latitude: point.lat, longitude: point.lng } });

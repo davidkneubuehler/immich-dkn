@@ -31,14 +31,15 @@ export const getStackBulkActions = ($t: MessageFormatter) => {
   const Stack: ActionItem = {
     title: $t('stack'),
     icon: mdiImageMultipleOutline,
-    $if: () => assetMultiSelectManager.ownedAssets.length > 1,
+    $if: () => !assetMultiSelectManager.selectWholeStack && assetMultiSelectManager.ownedAssets.length > 1,
     onAction: () => handleStack(assetMultiSelectManager.ownedAssets.map((asset) => asset.id)),
   };
 
   const Unstack: ActionItem = {
     title: $t('unstack'),
     icon: mdiImageOffOutline,
-    $if: () => assetMultiSelectManager.ownedAssets.every((asset) => !!asset.stack),
+    $if: () =>
+      !assetMultiSelectManager.selectWholeStack && assetMultiSelectManager.ownedAssets.every((asset) => !!asset.stack),
     onAction: () => handleDeleteStacks(assetMultiSelectManager.ownedAssets.map(({ stack }) => stack!)),
   };
 
