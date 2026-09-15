@@ -368,12 +368,6 @@
     }
   };
 
-  const handleSelectAsset = (asset: TimelineAsset) => {
-    if (!timelineManager.albumAssets.has(asset.id)) {
-      assetInteraction.selectAsset(asset);
-    }
-  };
-
   let lastAssetMouseEvent: TimelineAsset | null = $state(null);
 
   const handleSelectAssetCandidates = (asset: TimelineAsset | null) => {
@@ -383,7 +377,7 @@
     lastAssetMouseEvent = asset;
   };
 
-  const handleGroupSelect = (timelineDay: TimelineDay, assets: TimelineAsset[]) => {
+  const handleGroupSelect = async (timelineDay: TimelineDay, assets: TimelineAsset[]) => {
     const group = timelineDay.groupTitle;
     if (assetInteraction.selectedGroup.has(group)) {
       assetInteraction.removeGroupFromMultiselectGroup(group);
@@ -392,9 +386,7 @@
       }
     } else {
       assetInteraction.addGroupToMultiselectGroup(group);
-      for (const asset of assets) {
-        handleSelectAsset(asset);
-      }
+      await assetInteraction.addAssetsWithStacks(assets.filter((asset) => !timelineManager.albumAssets.has(asset.id)));
     }
 
     assetInteraction.selectAll = timelineManager.assetCount === assetInteraction.assets.length;
@@ -416,10 +408,7 @@
       }
       assetInteraction.removeAssetFromMultiselectGroup(asset.id);
     } else {
-      for (const candidate of assetInteraction.candidates) {
-        handleSelectAsset(candidate);
-      }
-      handleSelectAsset(asset);
+      await assetInteraction.addAssetsWithStacks([...assetInteraction.candidates, asset]);
     }
 
     assetInteraction.clearCandidates();
@@ -447,12 +436,13 @@
       for (let index = rangeStartIndex + 1; index < rangeEndIndex; index++) {
         const timelineMonth = timelineMonths[index];
         await timelineManager.loadTimelineMonth(timelineMonth.yearMonth);
-        for (const monthAsset of timelineMonth.assetsIterator()) {
-          if (deselect) {
+        const monthAssets = [...timelineMonth.assetsIterator()];
+        if (deselect) {
+          for (const monthAsset of monthAssets) {
             assetInteraction.removeAssetFromMultiselectGroup(monthAsset.id);
-          } else {
-            handleSelectAsset(monthAsset);
           }
+        } else {
+          await assetInteraction.addAssetsWithStacks(monthAssets);
         }
       }
 
@@ -516,13 +506,13 @@
     void timelineManager.loadTimelineMonth({ year: localDateTime.year, month: localDateTime.month });
   });
 
-  const assetSelectHandler = (
+  const assetSelectHandler = async (
     timelineManager: TimelineManager,
     asset: TimelineAsset,
     assetsInTimelineDay: TimelineAsset[],
     groupTitle: string,
   ) => {
-    void onSelectAssets(asset);
+    await onSelectAssets(asset);
 
     // Check if all assets are selected in a group to toggle the group selection's icon
     let selectedAssetsInGroupCount = assetsInTimelineDay.filter(({ id }) =>
@@ -546,7 +536,7 @@
     asset: TimelineAsset,
   ) => {
     if (isSelectionMode || assetInteraction.selectionActive) {
-      assetSelectHandler(timelineManager, asset, assets, groupTitle);
+      void assetSelectHandler(timelineManager, asset, assets, groupTitle);
       return;
     }
     void navigate({ targetRoute: 'current', assetId: asset.id });
@@ -660,7 +650,7 @@
             {singleSelect}
             {timelineMonth}
             manager={timelineManager}
-            onTimelineDaySelect={handleGroupSelect}
+            onTimelineDaySelect={(timelineDay, assets) => void handleGroupSelect(timelineDay, assets)}
           >
             {#snippet thumbnail({ asset, position, timelineDay, groupIndex })}
               {@const isAssetSelectionCandidate = assetInteraction.hasSelectionCandidate(asset.id)}
@@ -682,7 +672,7 @@
                 }}
                 onSelect={() => {
                   if (isSelectionMode || assetInteraction.selectionActive) {
-                    assetSelectHandler(timelineManager, asset, timelineDay.getAssets(), timelineDay.groupTitle);
+                    void assetSelectHandler(timelineManager, asset, timelineDay.getAssets(), timelineDay.groupTitle);
                     return;
                   }
                   void onSelectAssets(asset);
