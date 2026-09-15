@@ -20,6 +20,8 @@ Before making a downstream image available, publish the corresponding complete s
 
 ## Security cadence
 
+Dependency and base-image vulnerabilities are inherited from upstream and are not patched here, so the downstream stays a minimal web patch. The release workflow scans the downstream image and the official upstream `immich-server` image pinned in `UPSTREAM_IMAGE`, and fails only on fixable HIGH or CRITICAL findings that upstream does not have. Update `UPSTREAM_IMAGE` to the matching upstream release digest whenever the downstream moves to a new upstream release.
+
 Check upstream releases and security advisories at least weekly and after any relevant advisory. For a security update, transplant onto the supported upstream release, repeat the focused validation and production image build, review the image digest, SBOM, vulnerability scan, signature, and provenance, then publish a new downstream tag. Preserve a known-good digest for rollback.
 
 ## Release checklist
