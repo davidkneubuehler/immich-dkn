@@ -3,6 +3,12 @@ name: Downstream stack selection
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: 'Commit to validate. Defaults to the triggering commit.'
+        required: false
+        type: string
+        default: ''
   pull_request:
     paths:
       - 'web/**'
@@ -44,6 +50,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Setup pnpm
@@ -82,6 +89,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
           submodules: 'recursive'
 
