@@ -1,12 +1,17 @@
 <script lang="ts">
   import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
   import SharedLinkCreateModal from '$lib/modals/SharedLinkCreateModal.svelte';
-  import { IconButton, modalManager } from '@immich/ui';
+  import { IconButton, modalManager, toastManager } from '@immich/ui';
   import { mdiShareVariantOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';
 
   const handleClick = async () => {
-    await modalManager.show(SharedLinkCreateModal, { assetIds: assetMultiSelectManager.assets.map(({ id }) => id) });
+    const assets = await assetMultiSelectManager.getAssetsForAction();
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    await modalManager.show(SharedLinkCreateModal, { assetIds: assets.map(({ id }) => id) });
   };
 </script>
 
