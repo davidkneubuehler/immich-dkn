@@ -3,6 +3,7 @@
   import IndividualSharedViewer from '$lib/components/share-page/IndividualSharedViewer.svelte';
   import ControlAppBar from '$lib/components/shared-components/ControlAppBar.svelte';
   import ThemeButton from '$lib/components/shared-components/ThemeButton.svelte';
+  import ThirdPartySourceLink from '$lib/components/shared-components/ThirdPartySourceLink.svelte';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
   import { authManager } from '$lib/managers/auth-manager.svelte';
   import { setSharedLink } from '$lib/utils';
@@ -113,3 +114,5 @@
     <IndividualSharedViewer {sharedLink} {isOwned} />
   </div>
 {/if}
+
+<ThirdPartySourceLink class="fixed right-4 bottom-4 z-10 rounded-sm bg-white/90 px-2 py-1 shadow-sm dark:bg-black/90" />
