@@ -1,0 +1,575 @@
+name: Downstream upstream sync
+
+run-name: Downstream upstream sync${{ inputs.upstream_tag && format(' ({0})', inputs.upstream_tag) || '' }}${{ inputs.source_branch && format(' from {0}', inputs.source_branch) || '' }}
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream release tag to target, for testing (for example v3.2.1). Empty selects the latest release.'
+        required: false
+        type: string
+        default: ''
+      source_branch:
+        description: 'Branch whose downstream commits are transplanted, for testing (downstream/vX.Y.Z or dkn-test/*). Empty selects the default branch.'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: dkn-upstream-sync
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  UPSTREAM_REPOSITORY: immich-app/immich
+  UPSTREAM_IMAGE_NAME: ghcr.io/immich-app/immich-server
+
+jobs:
+  detect:
+    name: Detect upstream release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      proceed: ${{ steps.detect.outputs.proceed }}
+      base_tag: ${{ steps.detect.outputs.base_tag }}
+      base_sha: ${{ steps.detect.outputs.base_sha }}
+      base_published_at: ${{ steps.detect.outputs.base_published_at }}
+      target_tag: ${{ steps.detect.outputs.target_tag }}
+      target_sha: ${{ steps.detect.outputs.target_sha }}
+      release_url: ${{ steps.detect.outputs.release_url }}
+      source_branch: ${{ steps.detect.outputs.source_branch }}
+      upstream_image: ${{ steps.detect.outputs.upstream_image }}
+    steps:
+      - name: Compare the downstream base with upstream releases
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          INPUT_TAG: ${{ inputs.upstream_tag }}
+          INPUT_SOURCE: ${{ inputs.source_branch }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error title=Upstream sync failed::$1"
+            printf '## Upstream sync failed\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          skip() {
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            printf '## No action needed\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          if [[ ! "$DEFAULT_BRANCH" =~ ^downstream/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            fail "The default branch \`$DEFAULT_BRANCH\` does not name an upstream release (expected downstream/vX.Y.Z)."
+          fi
+          base_tag="${BASH_REMATCH[1]}"
+
+          source_branch="${INPUT_SOURCE:-$DEFAULT_BRANCH}"
+          if [[ ! "$source_branch" =~ ^(downstream/v[0-9]+\.[0-9]+\.[0-9]+|dkn-test/[A-Za-z0-9._-]+)$ ]]; then
+            fail "The source branch \`$source_branch\` must be downstream/vX.Y.Z or dkn-test/*."
+          fi
+
+          gh api --paginate "repos/$UPSTREAM_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | [.tag_name, .html_url, .published_at] | @tsv' \
+            > releases.tsv
+
+          if [ -n "$INPUT_TAG" ]; then
+            if [[ ! "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              fail "The upstream tag input \`$INPUT_TAG\` must look like vX.Y.Z."
+            fi
+            release=$(awk -F '\t' -v tag="$INPUT_TAG" '$1 == tag' releases.tsv)
+            [ -n "$release" ] || fail "\`$INPUT_TAG\` is not a published, non-prerelease release of $UPSTREAM_REPOSITORY."
+          else
+            release=$(awk -F '\t' '$1 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/' releases.tsv | sort -t "$(printf '\t')" -k1,1V | tail -n 1)
+            [ -n "$release" ] || fail "No published release of $UPSTREAM_REPOSITORY was found."
+          fi
+          IFS=$'\t' read -r target_tag release_url target_published_at <<< "$release"
+          base_published_at=$(awk -F '\t' -v tag="$base_tag" '$1 == tag { print $3 }' releases.tsv)
+
+          if [ -z "$INPUT_TAG" ]; then
+            newest=$(printf '%s\n%s\n' "$base_tag" "$target_tag" | sort -V | tail -n 1)
+            if [ "$target_tag" = "$base_tag" ] || [ "$newest" = "$base_tag" ]; then
+              skip "The downstream base \`$base_tag\` is already the latest upstream release (\`$target_tag\`, published $target_published_at)."
+            fi
+            candidates=("sync/$target_tag" "downstream/$target_tag")
+          else
+            candidates=("sync/$target_tag")
+          fi
+          for branch in "${candidates[@]}"; do
+            if gh api "repos/$REPOSITORY/git/matching-refs/heads/$branch" --jq '.[].ref' | grep -qx "refs/heads/$branch"; then
+              skip "A candidate for upstream \`$target_tag\` already exists: branch \`$branch\`."
+            fi
+          done
+
+          upstream_image_ref="$UPSTREAM_IMAGE_NAME:$target_tag"
+          if ! digest=$(docker buildx imagetools inspect "$upstream_image_ref" --format '{{json .Manifest}}' | jq -re .digest); then
+            skip "Upstream \`$target_tag\` is released, but \`$upstream_image_ref\` is not available yet. The next scheduled run retries."
+          fi
+
+          target_sha=$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$target_tag" --jq .sha)
+          base_sha=$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$base_tag" --jq .sha)
+
+          {
+            echo "proceed=true"
+            echo "base_tag=$base_tag"
+            echo "base_sha=$base_sha"
+            echo "base_published_at=$base_published_at"
+            echo "target_tag=$target_tag"
+            echo "target_sha=$target_sha"
+            echo "release_url=$release_url"
+            echo "source_branch=$source_branch"
+            echo "upstream_image=$upstream_image_ref@$digest"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Upstream release candidate"
+            echo
+            echo "- Upstream release: [\`$target_tag\`]($release_url), published $target_published_at"
+            echo "- Downstream base: \`$base_tag\` (\`$base_sha\`)"
+            echo "- Source branch: \`$source_branch\`"
+            echo "- Official image: \`$upstream_image_ref@$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  prepare:
+    name: Transplant downstream commits
+    needs: detect
+    if: needs.detect.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sync_sha: ${{ steps.push.outputs.sync_sha }}
+      sync_branch: ${{ steps.push.outputs.sync_branch }}
+      base_branch: ${{ steps.push.outputs.base_branch }}
+      commits: ${{ steps.transplant.outputs.commits }}
+    steps:
+      - name: Checkout source branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.detect.outputs.source_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Cherry-pick downstream commits onto the upstream tag
+        id: transplant
+        env:
+          SOURCE_BRANCH: ${{ needs.detect.outputs.source_branch }}
+          BASE_TAG: ${{ needs.detect.outputs.base_tag }}
+          BASE_SHA: ${{ needs.detect.outputs.base_sha }}
+          TARGET_TAG: ${{ needs.detect.outputs.target_tag }}
+          TARGET_SHA: ${{ needs.detect.outputs.target_sha }}
+          UPSTREAM_IMAGE: ${{ needs.detect.outputs.upstream_image }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error title=Upstream sync failed::$1"
+            printf '## Upstream sync failed\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          subject() { git log -1 --format='%h %s' "$1"; }
+
+          source_sha=$(git rev-parse HEAD)
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || fail "Upstream \`$BASE_TAG\` (\`$BASE_SHA\`) is not in the history of \`$SOURCE_BRANCH\`."
+          merge_base=$(git merge-base "$BASE_SHA" "$source_sha")
+          [ "$merge_base" = "$BASE_SHA" ] || fail "The merge base of \`$SOURCE_BRANCH\` and \`$BASE_TAG\` is \`$merge_base\`, not the base tag."
+          [ -z "$(git rev-list --merges "$merge_base..$source_sha")" ] || fail "\`$SOURCE_BRANCH\` contains merge commits after \`$BASE_TAG\`; the transplant needs a linear patch."
+          mapfile -t commits < <(git rev-list --reverse "$merge_base..$source_sha")
+          [ "${#commits[@]}" -gt 0 ] || fail "\`$SOURCE_BRANCH\` has no downstream commits after \`$BASE_TAG\`."
+
+          if ! git cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null; then
+            git fetch --quiet --no-tags --depth=1 "https://github.com/$UPSTREAM_REPOSITORY.git" "refs/tags/$TARGET_TAG"
+            [ "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$TARGET_SHA" ] || fail "Upstream tag \`$TARGET_TAG\` no longer points at \`$TARGET_SHA\`."
+          fi
+
+          log="${RUNNER_TEMP:-/tmp}/cherry-pick.log"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch --quiet --detach "$TARGET_SHA"
+
+          for index in "${!commits[@]}"; do
+            commit="${commits[$index]}"
+            if ! git cherry-pick -x --empty=drop "$commit" > "$log" 2>&1; then
+              mapfile -t conflicted < <(git diff --name-only --diff-filter=U)
+              {
+                echo "## Transplant onto Immich $TARGET_TAG failed"
+                echo
+                echo "Cherry-picking the downstream commits of \`$SOURCE_BRANCH\` (\`${merge_base:0:12}..${source_sha:0:12}\`) onto upstream \`$TARGET_TAG\` (\`${TARGET_SHA:0:12}\`) stopped with a conflict. The cherry-pick was aborted and no branches were created. Resolve the transplant locally as described in DOWNSTREAM.md."
+                echo
+                echo "### Conflicting commit"
+                echo
+                echo "- \`$(subject "$commit")\`"
+                echo
+                echo "### Conflicting files"
+                echo
+                if [ "${#conflicted[@]}" -eq 0 ]; then
+                  echo "- none reported; see the git output below"
+                else
+                  printf -- '- `%s`\n' "${conflicted[@]}"
+                fi
+                echo
+                echo "### Commits applied before the conflict"
+                echo
+                if [ "$index" -eq 0 ]; then echo "- none"; fi
+                for applied in "${commits[@]:0:$index}"; do echo "- \`$(subject "$applied")\`"; done
+                echo
+                echo "### Commits not applied"
+                echo
+                for pending in "${commits[@]:$index}"; do echo "- \`$(subject "$pending")\`"; done
+                echo
+                echo "<details><summary>git output</summary>"
+                echo
+                echo '```'
+                tail -n 40 "$log"
+                echo '```'
+                echo
+                echo "</details>"
+              } >> "$GITHUB_STEP_SUMMARY"
+              git cherry-pick --abort || true
+              echo "::error title=Upstream sync conflict::$(subject "$commit") conflicts with $TARGET_TAG in: ${conflicted[*]:-unknown files}"
+              exit 1
+            fi
+          done
+
+          release_workflow=.github/workflows/dkn-release.yml
+          if [ -f "$release_workflow" ] && grep -q '^      UPSTREAM_IMAGE: ' "$release_workflow"; then
+            current=$(sed -n 's/^      UPSTREAM_IMAGE: //p' "$release_workflow")
+            if [ "$current" != "$UPSTREAM_IMAGE" ]; then
+              sed -i "s|^      UPSTREAM_IMAGE: .*|      UPSTREAM_IMAGE: $UPSTREAM_IMAGE|" "$release_workflow"
+              git commit --quiet -m "ci(downstream): pin upstream baseline $TARGET_TAG" -- "$release_workflow"
+            fi
+          fi
+
+          delimiter="EOF_$(openssl rand -hex 8)"
+          {
+            echo "commits<<$delimiter"
+            git log --reverse --format='- `%h` %s' "$TARGET_SHA..HEAD"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Transplanted onto Immich $TARGET_TAG"
+            echo
+            git log --reverse --format='- `%h` %s' "$TARGET_SHA..HEAD"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create candidate branches
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TARGET_TAG: ${{ needs.detect.outputs.target_tag }}
+          TARGET_SHA: ${{ needs.detect.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          base_branch="upstream-base/$TARGET_TAG"
+          sync_branch="sync/$TARGET_TAG"
+
+          existing=$(gh api "repos/$REPOSITORY/git/matching-refs/heads/$base_branch" --jq ".[] | select(.ref == \"refs/heads/$base_branch\") | .object.sha")
+          if [ -z "$existing" ]; then
+            gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/heads/$base_branch" -f sha="$TARGET_SHA" > /dev/null
+          elif [ "$existing" != "$TARGET_SHA" ]; then
+            echo "::error title=Upstream sync failed::$base_branch exists at $existing instead of $TARGET_SHA"
+            exit 1
+          fi
+
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push --quiet "https://github.com/$REPOSITORY.git" "HEAD:refs/heads/$sync_branch"
+
+          {
+            echo "sync_sha=$(git rev-parse HEAD)"
+            echo "sync_branch=$sync_branch"
+            echo "base_branch=$base_branch"
+          } >> "$GITHUB_OUTPUT"
+          printf '\nCreated `%s` at upstream `%s` and `%s` at `%s`.\n' "$base_branch" "$TARGET_TAG" "$sync_branch" "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+  validation:
+    name: Focused validation
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/dkn-stack-selection.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sync_sha }}
+
+  scan:
+    name: Build and compare image findings
+    needs: [detect, prepare]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      comparison: ${{ steps.compare.outputs.comparison }}
+      added: ${{ steps.compare.outputs.added }}
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sync_sha }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build candidate immich-server without pushing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: server/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: immich-server:candidate
+          build-args: |
+            BUILD_ID=${{ github.run_id }}
+            BUILD_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            BUILD_IMAGE=immich-server:candidate
+            BUILD_IMAGE_URL=${{ github.server_url }}/${{ github.repository }}/pkgs/container/immich-server
+            BUILD_REPOSITORY=${{ github.repository }}
+            BUILD_REPOSITORY_URL=${{ github.server_url }}/${{ github.repository }}
+            BUILD_SOURCE_REF=${{ needs.prepare.outputs.sync_branch }}
+            BUILD_SOURCE_COMMIT=${{ needs.prepare.outputs.sync_sha }}
+            BUILD_SOURCE_URL=${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.prepare.outputs.sync_sha }}
+
+      - name: Scan candidate image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: immich-server:candidate
+          format: json
+          output: trivy-candidate.json
+          exit-code: '0'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          version: v0.69.3
+
+      - name: Scan official upstream image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ needs.detect.outputs.upstream_image }}
+          format: json
+          output: trivy-upstream.json
+          exit-code: '0'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          version: v0.69.3
+
+      - name: Compare findings
+        id: compare
+        env:
+          UPSTREAM_IMAGE: ${{ needs.detect.outputs.upstream_image }}
+        run: |
+          set -euo pipefail
+          findings() {
+            jq -r '.Results[]? | .Type as $type | .Vulnerabilities[]? | "\($type)|\(.PkgName)|\(.InstalledVersion)|\(.VulnerabilityID)|\(.Severity)"' "$1" | sort -u
+          }
+          findings trivy-candidate.json > trivy-candidate.txt
+          findings trivy-upstream.json > trivy-upstream.txt
+          comm -23 trivy-candidate.txt trivy-upstream.txt > trivy-added.txt
+          comm -12 trivy-candidate.txt trivy-upstream.txt > trivy-inherited.txt
+          group() {
+            awk -F '|' '{ key = $2 " " $3; list[key] = list[key] (list[key] ? ", " : "") $4 " (" $5 ")" } END { for (key in list) printf "- `%s`: %s\n", key, list[key] }' "$1" | sort
+          }
+          added=$(wc -l < trivy-added.txt | tr -d ' ')
+          {
+            echo "| Image (linux/amd64, Trivy v0.69.3, fixable HIGH/CRITICAL) | Findings |"
+            echo "| --- | ---: |"
+            echo "| Candidate built from this branch | $(wc -l < trivy-candidate.txt | tr -d ' ') |"
+            echo "| Official \`$UPSTREAM_IMAGE\` | $(wc -l < trivy-upstream.txt | tr -d ' ') |"
+            echo "| Added by the downstream (blocking) | $added |"
+            echo
+            if [ "$added" -gt 0 ]; then
+              echo "**Findings not present in the official image:**"
+              echo
+              group trivy-added.txt
+              echo
+            fi
+            echo "<details><summary>Inherited from the official image: $(wc -l < trivy-inherited.txt | tr -d ' ') findings (listed, not blocking)</summary>"
+            echo
+            group trivy-inherited.txt
+            echo
+            echo "</details>"
+          } > comparison.md
+          cat comparison.md >> "$GITHUB_STEP_SUMMARY"
+          delimiter="EOF_$(openssl rand -hex 8)"
+          {
+            echo "added=$added"
+            echo "comparison<<$delimiter"
+            cat comparison.md
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload scan evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upstream-sync-scan-${{ needs.detect.outputs.target_tag }}
+          path: |
+            trivy-candidate.json
+            trivy-upstream.json
+            trivy-added.txt
+            trivy-inherited.txt
+
+      - name: Fail on findings not present upstream
+        env:
+          ADDED: ${{ steps.compare.outputs.added }}
+        run: |
+          if [ "$ADDED" -gt 0 ]; then
+            echo "::error title=Vulnerability gate::The candidate adds $ADDED fixable HIGH/CRITICAL findings beyond the official image."
+            exit 1
+          fi
+
+  pull-request:
+    name: Open review pull request
+    needs: [detect, prepare, validation, scan]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Open pull request for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BASE_TAG: ${{ needs.detect.outputs.base_tag }}
+          BASE_PUBLISHED_AT: ${{ needs.detect.outputs.base_published_at }}
+          TARGET_TAG: ${{ needs.detect.outputs.target_tag }}
+          RELEASE_URL: ${{ needs.detect.outputs.release_url }}
+          SOURCE_BRANCH: ${{ needs.detect.outputs.source_branch }}
+          UPSTREAM_IMAGE: ${{ needs.detect.outputs.upstream_image }}
+          SYNC_BRANCH: ${{ needs.prepare.outputs.sync_branch }}
+          SYNC_SHA: ${{ needs.prepare.outputs.sync_sha }}
+          BASE_BRANCH: ${{ needs.prepare.outputs.base_branch }}
+          COMMITS: ${{ needs.prepare.outputs.commits }}
+          VALIDATION_RESULT: ${{ needs.validation.result }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+          SCAN_COMPARISON: ${{ needs.scan.outputs.comparison }}
+        run: |
+          set -euo pipefail
+          result() {
+            case "$1" in
+              success) echo "passed" ;;
+              failure) echo "**failed**" ;;
+              *) echo "**$1**" ;;
+            esac
+          }
+
+          referenced=""
+          if gh api "repos/$UPSTREAM_REPOSITORY/releases/tags/$TARGET_TAG" --jq '.body // ""' > release-body.md; then
+            referenced=$(grep -oE 'GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}' release-body.md | sort -u | tr '\n' ' ' || true)
+          fi
+          if gh api --paginate "repos/$UPSTREAM_REPOSITORY/security-advisories?state=published&per_page=100" \
+            --jq '.[] | [.ghsa_id, .severity, .published_at, .html_url, .summary] | @tsv' > advisories.tsv; then
+            advisories=$(awk -F '\t' -v since="$BASE_PUBLISHED_AT" -v referenced=" $referenced " \
+              '($3 > since) || index(referenced, " " $1 " ") { printf "- [%s](%s) %s, published %s: %s\n", $1, $4, $2, substr($3, 1, 10), $5 }' advisories.tsv)
+            [ -n "$advisories" ] || advisories="- None published since \`$BASE_TAG\` or referenced in the release notes."
+          else
+            advisories="- The upstream security advisories could not be retrieved; check the upstream advisories page."
+          fi
+
+          {
+            echo "Upstream released [Immich \`$TARGET_TAG\`]($RELEASE_URL). This pull request shows the downstream patch transplanted from \`$SOURCE_BRANCH\` onto that release, so its diff is exactly the downstream change."
+            echo
+            echo "**Review only. Do not merge.** Publishing stays manual; follow the release flow in DOWNSTREAM.md."
+            echo
+            echo "## Upstream"
+            echo
+            echo "- Release notes: $RELEASE_URL"
+            echo "- Previous downstream base: \`$BASE_TAG\`"
+            echo "- Official image: \`$UPSTREAM_IMAGE\`"
+            echo
+            echo "### Security advisories"
+            echo
+            echo "$advisories"
+            echo
+            echo "## Transplanted commits"
+            echo
+            echo "$COMMITS"
+            echo
+            echo "## Validation"
+            echo
+            echo "- Focused web checks and stack-selection E2E: $(result "$VALIDATION_RESULT")"
+            echo "- Production \`immich-server\` build and scanner comparison: $(result "$SCAN_RESULT")"
+            echo "- Workflow run: $RUN_URL"
+            echo
+            echo "## Scanner comparison"
+            echo
+            if [ -n "$SCAN_COMPARISON" ]; then echo "$SCAN_COMPARISON"; else echo "No comparison is available; see the workflow run."; fi
+            echo
+            echo "## Next steps"
+            echo
+            echo "1. Review this diff and the upstream release notes."
+            echo "2. Locally create a signed \`downstream/$TARGET_TAG\` from \`$SYNC_BRANCH\` (\`$SYNC_SHA\`) with agent-git."
+            echo "3. Push only that branch, wait for remote CI, then sign and push \`dkn-$TARGET_TAG-1\`."
+            echo "4. Verify the release run, then create the GitHub release and close this pull request."
+          } > pr-body.md
+
+          if [ "$(gh pr list --repo "$REPOSITORY" --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state all --json number --jq length)" -gt 0 ]; then
+            echo "A pull request from $SYNC_BRANCH into $BASE_BRANCH already exists." >> "$GITHUB_STEP_SUMMARY"
+          else
+            url=$(gh pr create --repo "$REPOSITORY" --base "$BASE_BRANCH" --head "$SYNC_BRANCH" \
+              --title "Review downstream patch on Immich $TARGET_TAG" --body-file pr-body.md)
+            gh pr edit "$url" --repo "$REPOSITORY" --add-reviewer "$OWNER" > /dev/null \
+              || echo "::warning::Could not request a review from $OWNER."
+            printf '## Review pull request\n\n%s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$VALIDATION_RESULT" != success ] || [ "$SCAN_RESULT" != success ]; then
+            echo "::error title=Candidate not ready::Validation: $VALIDATION_RESULT, scan: $SCAN_RESULT. See the pull request and run summary."
+            exit 1
+          fi
+
+  keepalive:
+    name: Keep the schedule active
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Re-enable the workflow and refresh activity when idle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          idle_days() {
+            local pushed_at
+            pushed_at=$(gh api "repos/$REPOSITORY" --jq .pushed_at)
+            echo $(( ( $(date -u +%s) - $(date -u -d "$pushed_at" +%s) ) / 86400 ))
+          }
+
+          gh api -X PUT "repos/$REPOSITORY/actions/workflows/dkn-upstream-sync.yml/enable"
+
+          idle=$(idle_days)
+          echo "Days since the last push to this repository: $idle" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$idle" -lt 45 ]; then
+            exit 0
+          fi
+
+          head=$(gh api "repos/$REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)
+          if gh api "repos/$REPOSITORY/git/ref/heads/dkn-keepalive" > /dev/null 2>&1; then
+            gh api -X DELETE "repos/$REPOSITORY/git/refs/heads/dkn-keepalive"
+          fi
+          gh api -X POST "repos/$REPOSITORY/git/refs" -f ref=refs/heads/dkn-keepalive -f sha="$head" > /dev/null
+          sleep 15
+
+          idle=$(idle_days)
+          if [ "$idle" -ge 45 ]; then
+            {
+              echo
+              echo "Refreshing \`dkn-keepalive\` did not register repository activity. GitHub may disable this schedule after 60 days without activity."
+              echo "If the workflow shows as disabled, re-enable it with: gh workflow enable dkn-upstream-sync.yml -R $REPOSITORY"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Schedule at risk::No repository activity for $idle days and the keepalive refresh did not register activity."
+            exit 1
+          fi
+          echo "Refreshed \`dkn-keepalive\`; repository activity registered." >> "$GITHUB_STEP_SUMMARY"
