@@ -25,7 +25,7 @@
   import { isTimelineAsset, toTimelineAsset } from '$lib/utils/timeline-util';
   import { TUNABLES } from '$lib/utils/tunables';
   import { AssetVisibility, type AssetResponseDto } from '@immich/sdk';
-  import { modalManager } from '@immich/ui';
+  import { modalManager, toastManager } from '@immich/ui';
   import { debounce } from 'lodash-es';
   import { t } from 'svelte-i18n';
 
@@ -120,11 +120,11 @@
     }
   });
 
-  const selectAllAssets = () => {
-    assetInteraction.selectAssets(assets.map((a) => toTimelineAsset(a)));
+  const selectAllAssets = async () => {
+    await assetInteraction.addAssetsWithStacks(assets.map((a) => toTimelineAsset(a)));
   };
 
-  const handleSelectAssets = (asset: TimelineAsset) => {
+  const handleSelectAssets = async (asset: TimelineAsset) => {
     if (!asset) {
       return;
     }
@@ -137,10 +137,7 @@
       }
       assetInteraction.removeAssetFromMultiselectGroup(asset.id);
     } else {
-      for (const candidate of assetInteraction.candidates) {
-        assetInteraction.selectAsset(candidate);
-      }
-      assetInteraction.selectAsset(asset);
+      await assetInteraction.addAssetsWithStacks([...assetInteraction.candidates, asset]);
     }
 
     assetInteraction.clearCandidates();
@@ -181,13 +178,16 @@
   };
 
   const onDelete = () => {
-    const hasTrashedAsset = assetInteraction.assets.some((asset) => asset.isTrashed);
-    handlePromiseError(trashOrDelete(hasTrashedAsset));
+    handlePromiseError(trashOrDelete());
   };
 
   const trashOrDelete = async (force: boolean = false) => {
-    const forceOrNoTrash = force || !featureFlagsManager.value.trash;
-    const selectedAssets = assetInteraction.assets;
+    const selectedAssets = await assetInteraction.getAssetsForAction();
+    if (!selectedAssets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    const forceOrNoTrash = force || selectedAssets.some((asset) => asset.isTrashed) || !featureFlagsManager.value.trash;
 
     if ($showDeleteModal && forceOrNoTrash) {
       const confirmed = await modalManager.show(AssetDeleteConfirmModal, { size: selectedAssets.length });
@@ -207,9 +207,16 @@
   };
 
   const toggleArchive = async () => {
+    const selectedAssets = await assetInteraction.getAssetsForAction();
+    if (!selectedAssets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
     const ids = await archiveAssets(
-      assetInteraction.assets,
-      assetInteraction.isAllArchived ? AssetVisibility.Timeline : AssetVisibility.Archive,
+      selectedAssets,
+      selectedAssets.every((asset) => asset.visibility === AssetVisibility.Archive)
+        ? AssetVisibility.Timeline
+        : AssetVisibility.Archive,
     );
     if (ids) {
       assets = assets.filter((asset) => !ids.includes(asset.id));
@@ -242,7 +249,7 @@
       const shortcuts: ShortcutOptions[] = [
         { shortcut: { key: '?', shift: true }, onShortcut: handleOpenShortcutModal },
         { shortcut: { key: '/' }, onShortcut: () => goto(Route.explore()) },
-        { shortcut: { key: 'A', ctrl: true }, onShortcut: () => selectAllAssets() },
+        { shortcut: { key: 'A', ctrl: true }, onShortcut: () => void selectAllAssets() },
         ...(arrowNavigation
           ? [
               { shortcut: { key: 'ArrowRight' }, preventDefault: false, onShortcut: focusNextAsset },
@@ -354,12 +361,12 @@
             readonly={disableAssetSelect}
             onClick={() => {
               if (assetInteraction.selectionActive) {
-                handleSelectAssets(currentAsset);
+                void handleSelectAssets(currentAsset);
                 return;
               }
               void navigateToAsset(asset);
             }}
-            onSelect={() => handleSelectAssets(currentAsset)}
+            onSelect={() => void handleSelectAssets(currentAsset)}
             onPreview={assetInteraction.selectionActive ? () => void navigateToAsset(asset) : undefined}
             onMouseEvent={() => assetMouseEventHandler(currentAsset)}
             {showArchiveIcon}

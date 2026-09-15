@@ -4,7 +4,7 @@
   import type { OnSetVisibility } from '$lib/utils/actions';
   import { handleError } from '$lib/utils/handle-error';
   import { AssetVisibility, updateAssets } from '@immich/sdk';
-  import { Button, modalManager } from '@immich/ui';
+  import { Button, modalManager, toastManager } from '@immich/ui';
   import { mdiLockOpenVariantOutline, mdiLockOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';
 
@@ -32,7 +32,12 @@
 
     try {
       loading = true;
-      const assetIds = assetMultiSelectManager.assets.map(({ id }) => id);
+      const assets = await assetMultiSelectManager.getAssetsForAction();
+      if (!assets) {
+        toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+        return;
+      }
+      const assetIds = assets.map(({ id }) => id);
 
       await updateAssets({
         assetBulkUpdateDto: {

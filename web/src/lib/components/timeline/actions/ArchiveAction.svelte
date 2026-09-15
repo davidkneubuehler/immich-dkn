@@ -4,7 +4,7 @@
   import type { OnArchive } from '$lib/utils/actions';
   import { archiveAssets } from '$lib/utils/asset-utils';
   import { AssetVisibility } from '@immich/sdk';
-  import { IconButton } from '@immich/ui';
+  import { IconButton, toastManager } from '@immich/ui';
   import { mdiArchiveArrowDownOutline, mdiArchiveArrowUpOutline, mdiTimerSand } from '@mdi/js';
   import { t } from 'svelte-i18n';
 
@@ -23,8 +23,14 @@
 
   const handleArchive = async () => {
     const visibility = unarchive ? AssetVisibility.Timeline : AssetVisibility.Archive;
-    const assets = assetMultiSelectManager.getOwnedAssets().filter((asset) => asset.visibility !== visibility);
     loading = true;
+    const selectedAssets = await assetMultiSelectManager.getOwnedAssetsForAction();
+    if (!selectedAssets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      loading = false;
+      return;
+    }
+    const assets = selectedAssets.filter((asset) => asset.visibility !== visibility);
     const ids = await archiveAssets(assets, visibility as AssetVisibility);
     if (ids) {
       onArchive?.(ids, visibility);

@@ -24,6 +24,7 @@ services:
         - BUILD_IMAGE=e2e
         - BUILD_SOURCE_REF=e2e
         - BUILD_SOURCE_COMMIT=e2eeeeeeeeeeeeeeeeee
+        - PUBLIC_IMMICH_SOURCE_URL=https://example.invalid/immich-source
     environment:
       DB_HOSTNAME: database
       DB_USERNAME: postgres
