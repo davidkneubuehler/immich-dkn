@@ -61,12 +61,26 @@ import { handleError } from '$lib/utils/handle-error';
 import { getFormatter } from '$lib/utils/i18n';
 
 export const getAssetBulkActions = ($t: MessageFormatter, album?: AlbumResponseDto) => {
-  const assetIds = assetMultiSelectManager.assets.map((asset) => asset.id);
   const ownedAssets = assetMultiSelectManager.ownedAssets;
   const isAlbumOwner = album?.albumUsers[0].user.id === authManager.user.id;
 
+  const getSelectedAssetIds = async (owned = false) => {
+    const assets = owned
+      ? await assetMultiSelectManager.getOwnedAssetsForAction()
+      : await assetMultiSelectManager.getAssetsForAction();
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    return assets.map(({ id }) => id);
+  };
+
   const onAction = async (name: AssetJobName) => {
-    await handleRunAssetJob({ name, assetIds: ownedAssets.map(({ id }) => id) });
+    const assetIds = await getSelectedAssetIds(true);
+    if (!assetIds) {
+      return;
+    }
+    await handleRunAssetJob({ name, assetIds });
     assetMultiSelectManager.clear();
   };
 
@@ -74,13 +88,23 @@ export const getAssetBulkActions = ($t: MessageFormatter, album?: AlbumResponseD
     title: $t('add_to_album'),
     icon: mdiPlus,
     shortcuts: [{ key: 'l' }],
-    onAction: () => modalManager.show(AssetAddToAlbumModal, { assetIds }),
+    onAction: async () => {
+      const assetIds = await getSelectedAssetIds();
+      if (assetIds) {
+        await modalManager.show(AssetAddToAlbumModal, { assetIds });
+      }
+    },
   };
 
   const CreateSharedLink: ActionItem = {
     title: $t('share'),
     icon: mdiShareVariantOutline,
-    onAction: () => modalManager.show(SharedLinkCreateModal, { assetIds }),
+    onAction: async () => {
+      const assetIds = await getSelectedAssetIds();
+      if (assetIds) {
+        await modalManager.show(SharedLinkCreateModal, { assetIds });
+      }
+    },
   };
 
   const RemoveFromAlbum: ActionItem = {
@@ -88,7 +112,12 @@ export const getAssetBulkActions = ($t: MessageFormatter, album?: AlbumResponseD
     icon: mdiImageRemoveOutline,
     shortcuts: [{ key: 'l', shift: true }],
     $if: () => !!album && (isAlbumOwner || assetMultiSelectManager.isAllUserOwned),
-    onAction: () => handleBulkRemoveAssetsFromAlbum(assetIds, album!),
+    onAction: async () => {
+      const assetIds = await getSelectedAssetIds();
+      if (assetIds) {
+        await handleBulkRemoveAssetsFromAlbum(assetIds, album!);
+      }
+    },
   };
 
   const Tag: ActionItem = {
@@ -96,7 +125,8 @@ export const getAssetBulkActions = ($t: MessageFormatter, album?: AlbumResponseD
     icon: mdiTagMultipleOutline,
     $if: () => authManager.preferences.tags.enabled && assetMultiSelectManager.isAllUserOwned,
     onAction: async () => {
-      if (await modalManager.show(AssetTagModal, { assetIds })) {
+      const assetIds = await getSelectedAssetIds(true);
+      if (assetIds && (await modalManager.show(AssetTagModal, { assetIds }))) {
         assetMultiSelectManager.clear();
       }
     },

@@ -1,0 +1,132 @@
+name: Downstream stack selection
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'e2e/**'
+      - 'i18n/**'
+      - 'packages/sdk/**'
+      - 'packages/plugin-sdk/**'
+      - 'server/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/dkn-stack-selection.yml'
+      - '.github/workflows/dkn-release.yml'
+  push:
+    branches:
+      - '**'
+    paths:
+      - 'web/**'
+      - 'e2e/**'
+      - 'i18n/**'
+      - 'packages/sdk/**'
+      - 'packages/plugin-sdk/**'
+      - 'server/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/dkn-stack-selection.yml'
+      - '.github/workflows/dkn-release.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-stack-selection-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  web:
+    name: Web checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+
+      - name: Install web and server dependencies
+        run: pnpm --filter @immich/sdk --filter @immich/plugin-sdk --filter immich --filter immich-web install --frozen-lockfile
+
+      - name: Build workspace SDKs
+        run: pnpm --filter @immich/sdk --filter @immich/plugin-sdk build
+
+      - name: Run focused unit tests
+        run: pnpm --dir web exec vitest run src/lib/managers/asset-multi-select-manager.svelte.spec.ts src/lib/services/asset.service.spec.ts
+
+      - name: Run web static checks
+        run: pnpm --dir web run check:code
+
+      - name: Run server static checks
+        run: pnpm --dir server run format && pnpm --dir server run lint && pnpm --dir server run check
+
+  e2e:
+    name: Stack selection E2E
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ./e2e
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+          cache-dependency-path: '**/pnpm-lock.yaml'
+
+      - name: Build SDK
+        run: pnpm --filter @immich/sdk install --frozen-lockfile && pnpm --filter @immich/sdk build
+        working-directory: .
+
+      - name: Install web and E2E dependencies
+        run: pnpm --dir web install --frozen-lockfile && pnpm --dir e2e install --frozen-lockfile
+        working-directory: .
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install chromium --only-shell
+
+      - name: Start E2E environment
+        run: docker compose up -d --build --renew-anon-volumes --force-recreate --remove-orphans --wait --wait-timeout 300
+
+      - name: Run downstream web specifications
+        env:
+          PLAYWRIGHT_DISABLE_WEBSERVER: true
+        run: pnpm test:web src/specs/web/stack-selection.e2e-spec.ts src/specs/web/source-link.e2e-spec.ts
+
+      - name: Verify the authenticated server about endpoint
+        env:
+          VITEST_DISABLE_DOCKER_SETUP: true
+        run: pnpm test src/specs/server/api/server.e2e-spec.ts
+
+      - name: Capture Docker logs
+        if: always()
+        run: docker compose logs --no-color > docker-compose-logs.txt
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: downstream-stack-selection-e2e
+          path: |
+            e2e/docker-compose-logs.txt
+            e2e/playwright-report/

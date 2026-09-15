@@ -26,7 +26,12 @@
     loading = true;
 
     try {
-      const assets = assetMultiSelectManager.ownedAssets.filter((asset) => asset.isFavorite !== isFavorite);
+      const selectedAssets = await assetMultiSelectManager.getOwnedAssetsForAction();
+      if (!selectedAssets) {
+        toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+        return;
+      }
+      const assets = selectedAssets.filter((asset) => asset.isFavorite !== isFavorite);
 
       const ids = assets.map(({ id }) => id);
 

@@ -13,6 +13,10 @@
 </p>
 <h3 align="center">High performance self-hosted photo and video management solution</h3>
 <br/>
+
+> [!CAUTION]
+> This is an unofficial downstream modification of Immich, based on upstream `v3.2.1`. It is unsupported by the Immich project. The modified `immich-server` image bundles the web stack-selection patch; mobile and machine-learning artifacts remain upstream artifacts. Read [DOWNSTREAM.md](DOWNSTREAM.md) before deploying or publishing a downstream image.
+
 <a href="https://immich.app">
 <img src="design/immich-screenshots.png" title="Main Screenshot">
 </a>
