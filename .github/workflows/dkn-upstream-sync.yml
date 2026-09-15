@@ -512,8 +512,8 @@ jobs:
             echo "4. Verify the release run, then create the GitHub release and close this pull request."
           } > pr-body.md
 
-          if [ "$(gh pr list --repo "$REPOSITORY" --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state all --json number --jq length)" -gt 0 ]; then
-            echo "A pull request from $SYNC_BRANCH into $BASE_BRANCH already exists." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$(gh pr list --repo "$REPOSITORY" --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq length)" -gt 0 ]; then
+            echo "An open pull request from $SYNC_BRANCH into $BASE_BRANCH already exists." >> "$GITHUB_STEP_SUMMARY"
           else
             url=$(gh pr create --repo "$REPOSITORY" --base "$BASE_BRANCH" --head "$SYNC_BRANCH" \
               --title "Review downstream patch on Immich $TARGET_TAG" --body-file pr-body.md)
