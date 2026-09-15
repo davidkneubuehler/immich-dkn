@@ -17,7 +17,7 @@ The web application adds an opt-in whole-stack selection toggle. It is off by de
 5. On success it creates `upstream-base/vX.Y.Z` at the upstream tag and `sync/vX.Y.Z` with the transplanted commits. It then runs `dkn-stack-selection.yml` against the candidate, builds the production `immich-server` image for linux/amd64 without pushing it, and compares its fixable HIGH and CRITICAL findings with the official image of the same upstream version.
 6. It opens a pull request from `sync/vX.Y.Z` into `upstream-base/vX.Y.Z`, so the diff is exactly the downstream patch, and requests a review from the repository owner. The body links the upstream release notes, lists security advisories published since the previous base or referenced in the release notes, and includes the validation results and the scanner comparison. If validation or the comparison fails, the pull request is still opened and the run fails.
 
-Automation never approves, merges, signs, tags, publishes images, or creates releases. The pull request exists only for review and is closed, not merged, after the release.
+Automation never approves, merges, signs, tags, publishes images, or creates releases. The pull request exists only for review and is closed, not merged, after the release. Pull requests into `upstream-base/*` do not trigger `dkn-stack-selection.yml`, because the sync run already validates the exact candidate commit.
 
 For testing, dispatch the workflow with `upstream_tag` (for example `v3.2.1`) and optionally `source_branch` (`downstream/vX.Y.Z` or `dkn-test/*`). An explicit tag skips the "newer release" check but still stops when `sync/<tag>` exists.
 
