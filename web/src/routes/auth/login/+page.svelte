@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import AuthPageLayout from '$lib/components/layouts/AuthPageLayout.svelte';
+  import ThirdPartySourceLink from '$lib/components/shared-components/ThirdPartySourceLink.svelte';
   import { eventManager } from '$lib/managers/event-manager.svelte';
   import { serverConfigManager } from '$lib/managers/server-config-manager.svelte';
   import { Route } from '$lib/route';
@@ -184,4 +185,7 @@
       <Alert color="warning" title={$t('login_has_been_disabled')} />
     {/if}
   </Stack>
+  <div class="mt-6 text-center">
+    <ThirdPartySourceLink />
+  </div>
 </AuthPageLayout>

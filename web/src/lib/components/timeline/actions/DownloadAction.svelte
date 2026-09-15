@@ -7,7 +7,7 @@
   import { handleDownloadAsset } from '$lib/services/asset.service';
   import { downloadArchive } from '$lib/utils/asset-utils';
   import { getAssetInfo } from '@immich/sdk';
-  import { IconButton } from '@immich/ui';
+  import { IconButton, toastManager } from '@immich/ui';
   import { mdiDownload } from '@mdi/js';
   import { t } from 'svelte-i18n';
 
@@ -19,7 +19,11 @@
   let { filename = 'immich', menuItem = false }: Props = $props();
 
   const handleDownloadFiles = async () => {
-    const assets = assetMultiSelectManager.assets;
+    const assets = await assetMultiSelectManager.getAssetsForAction();
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
     if (assets.length === 1) {
       assetMultiSelectManager.clear();
       let asset = await getAssetInfo({ ...authManager.params, id: assets[0].id });

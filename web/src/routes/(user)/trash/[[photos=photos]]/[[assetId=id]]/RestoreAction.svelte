@@ -19,7 +19,12 @@
     loading = true;
 
     try {
-      const ids = assetMultiSelectManager.assets.map((a) => a.id);
+      const assets = await assetMultiSelectManager.getAssetsForAction();
+      if (!assets) {
+        toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+        return;
+      }
+      const ids = assets.map((asset) => asset.id);
       await restoreAssets({ bulkIdsDto: { ids } });
       onRestore?.(ids);
       toastManager.primary($t('assets_restored_count', { values: { count: ids.length } }));

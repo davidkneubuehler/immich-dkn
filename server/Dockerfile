@@ -50,7 +50,11 @@ COPY ./i18n ./i18n/
 COPY ./web ./web/
 
 ARG BUILD_ID
+ARG BUILD_SOURCE_COMMIT
+ARG BUILD_SOURCE_URL=https://github.com/immich-app/immich/commit/${BUILD_SOURCE_COMMIT}
+ARG PUBLIC_IMMICH_SOURCE_URL=${BUILD_SOURCE_URL}
 ENV IMMICH_BUILD=${BUILD_ID}
+ENV PUBLIC_IMMICH_SOURCE_URL=${PUBLIC_IMMICH_SOURCE_URL}
 
 RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter immich-web build
 
@@ -108,16 +112,21 @@ ARG BUILD_ID
 ARG BUILD_IMAGE
 ARG BUILD_SOURCE_REF
 ARG BUILD_SOURCE_COMMIT
+ARG BUILD_URL=https://github.com/immich-app/immich/actions/runs/${BUILD_ID}
+ARG BUILD_IMAGE_URL=https://github.com/immich-app/immich/pkgs/container/immich-server
+ARG BUILD_REPOSITORY=immich-app/immich
+ARG BUILD_REPOSITORY_URL=https://github.com/immich-app/immich
+ARG BUILD_SOURCE_URL=https://github.com/immich-app/immich/commit/${BUILD_SOURCE_COMMIT}
 
 ENV IMMICH_BUILD=${BUILD_ID}
-ENV IMMICH_BUILD_URL=https://github.com/immich-app/immich/actions/runs/${BUILD_ID}
+ENV IMMICH_BUILD_URL=${BUILD_URL}
 ENV IMMICH_BUILD_IMAGE=${BUILD_IMAGE}
-ENV IMMICH_BUILD_IMAGE_URL=https://github.com/immich-app/immich/pkgs/container/immich-server
-ENV IMMICH_REPOSITORY=immich-app/immich
-ENV IMMICH_REPOSITORY_URL=https://github.com/immich-app/immich
+ENV IMMICH_BUILD_IMAGE_URL=${BUILD_IMAGE_URL}
+ENV IMMICH_REPOSITORY=${BUILD_REPOSITORY}
+ENV IMMICH_REPOSITORY_URL=${BUILD_REPOSITORY_URL}
 ENV IMMICH_SOURCE_REF=${BUILD_SOURCE_REF}
 ENV IMMICH_SOURCE_COMMIT=${BUILD_SOURCE_COMMIT}
-ENV IMMICH_SOURCE_URL=https://github.com/immich-app/immich/commit/${BUILD_SOURCE_COMMIT}
+ENV IMMICH_SOURCE_URL=${BUILD_SOURCE_URL}
 
 VOLUME /data
 EXPOSE 2283
