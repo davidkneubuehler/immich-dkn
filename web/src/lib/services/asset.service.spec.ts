@@ -1,17 +1,22 @@
 import { getAssetInfo } from '@immich/sdk';
-import { toastManager } from '@immich/ui';
+import { modalManager, toastManager } from '@immich/ui';
 import { vitest } from 'vitest';
+import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
 import { authManager } from '$lib/managers/auth-manager.svelte';
-import { getAssetActions, handleDownloadAsset } from '$lib/services/asset.service';
+import { getAssetActions, getAssetBulkActions, handleDownloadAsset } from '$lib/services/asset.service';
 import { setSharedLink } from '$lib/utils';
 import { getFormatter } from '$lib/utils/i18n';
-import { assetFactory } from '@test-data/factories/asset-factory';
+import { assetFactory, timelineAssetFactory } from '@test-data/factories/asset-factory';
 import { preferencesFactory } from '@test-data/factories/preferences-factory';
 import { sharedLinkFactory } from '@test-data/factories/shared-link-factory';
 import { userAdminFactory } from '@test-data/factories/user-factory';
 
 vitest.mock('@immich/ui', () => ({
+  modalManager: {
+    show: vitest.fn(),
+  },
   toastManager: {
+    danger: vitest.fn(),
     primary: vitest.fn(),
   },
 }));
@@ -20,6 +25,18 @@ vitest.mock('$lib/utils/i18n', () => ({
   getFormatter: vitest.fn(),
   getPreferredLocale: vitest.fn(),
 }));
+
+vitest.mock('$lib/managers/user-preferences-manager.svelte', () => ({
+  userPreferencesManager: {},
+}));
+
+vitest.mock('$lib/modals/AssetAddToAlbumModal.svelte', () => ({
+  default: 'AssetAddToAlbumModal',
+}));
+
+vitest.mock('$lib/modals/AssetTagModal.svelte', () => ({ default: 'AssetTagModal' }));
+vitest.mock('$lib/modals/ProfileImageCropperModal.svelte', () => ({ default: 'ProfileImageCropperModal' }));
+vitest.mock('$lib/modals/SharedLinkCreateModal.svelte', () => ({ default: 'SharedLinkCreateModal' }));
 
 vitest.mock('@immich/sdk');
 
@@ -38,6 +55,38 @@ vi.mock(import('$lib/managers/feature-flags-manager.svelte'), function () {
 });
 
 describe('AssetService', () => {
+  describe('getAssetBulkActions', () => {
+    beforeEach(() => {
+      vitest.clearAllMocks();
+    });
+
+    afterEach(() => {
+      vitest.restoreAllMocks();
+    });
+
+    it('passes the refreshed stack-expanded selection to Add to Album', async () => {
+      const assets = timelineAssetFactory.buildList(2);
+      vitest.spyOn(assetMultiSelectManager, 'getAssetsForAction').mockResolvedValue(assets);
+      const actions = getAssetBulkActions(String);
+
+      await actions.AddToAlbum.onAction?.(undefined as never);
+
+      expect(modalManager.show).toHaveBeenCalledWith('AssetAddToAlbumModal', {
+        assetIds: assets.map((asset) => asset.id),
+      });
+    });
+
+    it('aborts Add to Album when stack resolution fails', async () => {
+      vitest.spyOn(assetMultiSelectManager, 'getAssetsForAction').mockResolvedValue(undefined);
+      const actions = getAssetBulkActions(String);
+
+      await actions.AddToAlbum.onAction?.(undefined as never);
+
+      expect(toastManager.danger).toHaveBeenCalledWith('errors.unable_to_resolve_selected_stack');
+      expect(modalManager.show).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getAssetActions', () => {
     beforeEach(() => {
       authManager.setPreferences(preferencesFactory.build());

@@ -370,6 +370,7 @@ export const selectAllAssets = async (timelineManager: TimelineManager, assetInt
   assetInteraction.selectAll = true;
 
   try {
+    const assets: TimelineAsset[] = [];
     for (const timelineMonth of timelineManager.months) {
       if (!timelineMonth.isLoaded) {
         await timelineManager.loadTimelineMonth(timelineMonth.yearMonth);
@@ -379,11 +380,19 @@ export const selectAllAssets = async (timelineManager: TimelineManager, assetInt
         assetInteraction.clear();
         break; // Cancelled
       }
-      assetInteraction.selectAssets([...timelineMonth.assetsIterator()]);
+      assets.push(...timelineMonth.assetsIterator());
 
       for (const dateGroup of timelineMonth.timelineDays) {
         assetInteraction.addGroupToMultiselectGroup(dateGroup.groupTitle);
       }
+    }
+
+    if (!assetInteraction.selectAll) {
+      return;
+    }
+
+    if (!(await assetInteraction.addAssetsWithStacks(assets))) {
+      assetInteraction.clear();
     }
   } catch (error) {
     const $t = get(t);

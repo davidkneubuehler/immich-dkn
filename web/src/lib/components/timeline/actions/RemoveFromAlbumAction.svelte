@@ -17,7 +17,12 @@
   let { album = $bindable(), onRemove, assetIds, menuItem = false }: Props = $props();
 
   const removeFromAlbum = async () => {
-    const ids = assetIds ?? assetMultiSelectManager.assets.map(({ id }) => id) ?? [];
+    const selectedAssets = assetIds ? undefined : await assetMultiSelectManager.getAssetsForAction();
+    if (!assetIds && !selectedAssets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    const ids = assetIds ?? selectedAssets!.map(({ id }) => id);
 
     const isConfirmed = await modalManager.showDialog({
       prompt: $t('remove_assets_album_confirmation', { values: { count: ids.length } }),

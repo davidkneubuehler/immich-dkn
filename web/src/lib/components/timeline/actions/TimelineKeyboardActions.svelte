@@ -22,7 +22,8 @@
   import { deleteAssets, updateStackedAssetInTimeline } from '$lib/utils/actions';
   import { archiveAssets, selectAllAssets, stackAssets } from '$lib/utils/asset-utils';
   import { AssetVisibility } from '@immich/sdk';
-  import { isModalOpen, modalManager } from '@immich/ui';
+  import { isModalOpen, modalManager, toastManager } from '@immich/ui';
+  import { t } from 'svelte-i18n';
 
   type Props = {
     timelineManager: TimelineManager;
@@ -34,8 +35,12 @@
   let { timelineManager = $bindable(), assetInteraction, onEscape, scrollToAsset }: Props = $props();
 
   const trashOrDelete = async (forceRequested?: boolean) => {
-    const force = forceRequested || !featureFlagsManager.value.trash;
-    const selectedAssets = assetInteraction.assets;
+    const selectedAssets = await assetInteraction.getAssetsForAction();
+    if (!selectedAssets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    const force = forceRequested || selectedAssets.some((asset) => asset.isTrashed) || !featureFlagsManager.value.trash;
 
     if ($showDeleteModal && force) {
       const confirmed = await modalManager.show(AssetDeleteConfirmModal, { size: selectedAssets.length });
@@ -54,12 +59,16 @@
   };
 
   const onDelete = () => {
-    const hasTrashedAsset = assetInteraction.assets.some((asset) => asset.isTrashed);
-    handlePromiseError(trashOrDelete(hasTrashedAsset));
+    handlePromiseError(trashOrDelete());
   };
 
   const onStackAssets = async () => {
-    const result = await stackAssets(assetInteraction.assets);
+    const assets = await assetInteraction.getOwnedAssetsForAction();
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    const result = await stackAssets(assets);
 
     updateStackedAssetInTimeline(timelineManager, result);
 
@@ -67,8 +76,15 @@
   };
 
   const toggleArchive = async () => {
-    const visibility = assetInteraction.isAllArchived ? AssetVisibility.Timeline : AssetVisibility.Archive;
-    const ids = await archiveAssets(assetInteraction.assets, visibility);
+    const assets = await assetInteraction.getAssetsForAction();
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    const visibility = assets.every((asset) => asset.visibility === AssetVisibility.Archive)
+      ? AssetVisibility.Timeline
+      : AssetVisibility.Archive;
+    const ids = await archiveAssets(assets, visibility);
     timelineManager.update(ids, (asset) => (asset.visibility = visibility));
     eventManager.emit('AssetsArchive', ids);
     assetInteraction.clear();

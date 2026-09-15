@@ -59,7 +59,12 @@ export const getAssetBulkActions = ($t: MessageFormatter) => {
   const ownedAssets = assetMultiSelectManager.ownedAssets;
 
   const onAction = async (name: AssetJobName) => {
-    await handleRunAssetJob({ name, assetIds: ownedAssets.map(({ id }) => id) });
+    const assets = await assetMultiSelectManager.getOwnedAssetsForAction();
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    await handleRunAssetJob({ name, assetIds: assets.map(({ id }) => id) });
     assetMultiSelectManager.clear();
   };
 
@@ -67,8 +72,14 @@ export const getAssetBulkActions = ($t: MessageFormatter) => {
     title: $t('add_to_album'),
     icon: mdiPlus,
     shortcuts: [{ key: 'l' }],
-    onAction: () =>
-      modalManager.show(AssetAddToAlbumModal, { assetIds: assetMultiSelectManager.assets.map((asset) => asset.id) }),
+    onAction: async () => {
+      const assets = await assetMultiSelectManager.getAssetsForAction();
+      if (!assets) {
+        toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+        return;
+      }
+      await modalManager.show(AssetAddToAlbumModal, { assetIds: assets.map((asset) => asset.id) });
+    },
   };
 
   const RefreshFacesJob: ActionItem = {

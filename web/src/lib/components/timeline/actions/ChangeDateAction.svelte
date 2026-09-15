@@ -3,7 +3,7 @@
   import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
   import AssetSelectionChangeDateModal from '$lib/modals/AssetSelectionChangeDateModal.svelte';
   import { fromTimelinePlainDateTime } from '$lib/utils/timeline-util';
-  import { modalManager } from '@immich/ui';
+  import { modalManager, toastManager } from '@immich/ui';
   import { mdiCalendarEditOutline } from '@mdi/js';
   import { DateTime } from 'luxon';
   import { t } from 'svelte-i18n';
@@ -15,7 +15,11 @@
   let { menuItem = false }: Props = $props();
 
   const handleChangeDate = async () => {
-    const assets = assetMultiSelectManager.ownedAssets;
+    const assets = await assetMultiSelectManager.getOwnedAssetsForAction();
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
     const initialDate = assets.length === 1 ? fromTimelinePlainDateTime(assets[0].localDateTime) : DateTime.now();
     const success = await modalManager.show(AssetSelectionChangeDateModal, {
       initialDate,

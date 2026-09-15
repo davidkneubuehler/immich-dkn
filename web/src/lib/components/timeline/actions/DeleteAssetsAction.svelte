@@ -1,11 +1,12 @@
 <script lang="ts">
   import MenuOption from '$lib/components/shared-components/context-menu/MenuOption.svelte';
   import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
+  import { authManager } from '$lib/managers/auth-manager.svelte';
   import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
   import AssetDeleteConfirmModal from '$lib/modals/AssetDeleteConfirmModal.svelte';
   import { showDeleteModal } from '$lib/stores/preferences.store';
   import { type OnDelete, type OnUndoDelete, deleteAssets } from '$lib/utils/actions';
-  import { IconButton, modalManager } from '@immich/ui';
+  import { IconButton, modalManager, toastManager } from '@immich/ui';
   import { mdiDeleteForeverOutline, mdiDeleteOutline, mdiTimerSand } from '@mdi/js';
   import { t } from 'svelte-i18n';
 
@@ -23,7 +24,14 @@
   let loading = $state(false);
 
   const onAction = async () => {
-    const assets = assetMultiSelectManager.ownedAssets;
+    const selectedAssets = await assetMultiSelectManager.getAssetsForAction();
+    if (!selectedAssets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    const assets = authManager.authenticated
+      ? selectedAssets.filter((asset) => asset.ownerId === authManager.user.id)
+      : selectedAssets;
 
     if (force && $showDeleteModal) {
       const confirmed = await modalManager.show(AssetDeleteConfirmModal, { size: assets.length });
