@@ -14,6 +14,7 @@
     onClick: () => void;
     shortcut?: Shortcut | null;
     shortcutLabel?: string;
+    disabled?: boolean;
   }
 
   let {
@@ -25,6 +26,7 @@
     onClick,
     shortcut = null,
     shortcutLabel = '',
+    disabled = false,
   }: Props = $props();
 
   let id: string = generateId();
@@ -32,6 +34,9 @@
   let isActive = $derived($selectedIdStore === id);
 
   const handleClick = () => {
+    if (disabled) {
+      return;
+    }
     // eslint-disable-next-line unicorn/no-optional-chaining-on-undeclared-variable
     $optionClickCallbackStore?.();
     onClick();
@@ -41,7 +46,7 @@
     shortcutLabel = computeShortcutLabel(shortcut);
   }
   const bindShortcutIfSet = shortcut
-    ? (n: HTMLElement) => bindShortcut(n, { shortcut, onShortcut: onClick })
+    ? (n: HTMLElement) => bindShortcut(n, { shortcut, onShortcut: () => !disabled && onClick() })
     : () => {};
 </script>
 
@@ -54,10 +59,11 @@
   onclick={handleClick}
   onmouseover={() => ($selectedIdStore = id)}
   onmouseleave={() => ($selectedIdStore = undefined)}
-  class="w-full p-4 text-start text-sm font-medium {textColor} flex cursor-pointer items-center gap-2 border-gray-200 focus:ring-2 focus:outline-none focus:ring-inset {isActive
-    ? activeColor
-    : 'bg-slate-100'}"
+  class="w-full p-4 text-start text-sm font-medium {textColor} flex items-center gap-2 border-gray-200 focus:ring-2 focus:outline-none focus:ring-inset {disabled
+    ? 'cursor-not-allowed opacity-50'
+    : 'cursor-pointer'} {isActive ? activeColor : 'bg-slate-100'}"
   role="menuitem"
+  aria-disabled={disabled}
 >
   {#if icon}
     <Icon {icon} aria-hidden size="18" />
