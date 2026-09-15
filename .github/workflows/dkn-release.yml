@@ -22,6 +22,8 @@ jobs:
     name: Build and publish immich-server
     needs: validation
     runs-on: ubuntu-latest
+    env:
+      UPSTREAM_IMAGE: ghcr.io/immich-app/immich-server:v3.2.1@sha256:2ab6a6273755d9b8a5c4f25dbaa2d097fc4a2cc261b70bc73621e6405cc106fe
     permissions:
       attestations: write
       contents: read
@@ -103,20 +105,45 @@ jobs:
           output: immich-server-sbom.cdx.json
           version: v0.69.3
 
-      - name: Scan image for vulnerabilities
+      - name: Scan downstream image for vulnerabilities
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/immich-server@${{ steps.build.outputs.digest }}
-          format: table
-          exit-code: '1'
+          format: json
+          output: trivy-downstream.json
+          exit-code: '0'
           ignore-unfixed: true
           severity: HIGH,CRITICAL
           version: v0.69.3
 
-      - name: Record image digest
+      - name: Scan upstream baseline image for vulnerabilities
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ env.UPSTREAM_IMAGE }}
+          format: json
+          output: trivy-upstream.json
+          exit-code: '0'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          version: v0.69.3
+
+      - name: Record image digest and new findings
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: echo "$DIGEST" > immich-server.digest
+        run: |
+          echo "$DIGEST" > immich-server.digest
+          findings() {
+            jq -r '.Results[]? | .Type as $type | .Vulnerabilities[]? | "\($type)|\(.PkgName)|\(.InstalledVersion)|\(.VulnerabilityID)|\(.Severity)"' "$1" | sort -u
+          }
+          findings trivy-downstream.json > trivy-downstream.txt
+          findings trivy-upstream.json > trivy-upstream.txt
+          comm -23 trivy-downstream.txt trivy-upstream.txt > trivy-new-findings.txt
+          {
+            echo "Upstream baseline: $UPSTREAM_IMAGE"
+            echo "Downstream fixable HIGH/CRITICAL findings: $(wc -l < trivy-downstream.txt)"
+            echo "Upstream fixable HIGH/CRITICAL findings: $(wc -l < trivy-upstream.txt)"
+            echo "Findings not present upstream: $(wc -l < trivy-new-findings.txt)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload release evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -125,6 +152,17 @@ jobs:
           path: |
             immich-server.digest
             immich-server-sbom.cdx.json
+            trivy-downstream.json
+            trivy-upstream.json
+            trivy-new-findings.txt
+
+      - name: Fail on vulnerabilities not present upstream
+        run: |
+          if [ -s trivy-new-findings.txt ]; then
+            echo "Downstream image adds fixable HIGH/CRITICAL findings:" >&2
+            cat trivy-new-findings.txt >&2
+            exit 1
+          fi
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
