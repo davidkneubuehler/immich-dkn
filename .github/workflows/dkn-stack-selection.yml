@@ -10,6 +10,10 @@ on:
         type: string
         default: ''
   pull_request:
+    # Review pull requests from the upstream sync target upstream-base/*. The sync
+    # workflow already validates the exact candidate commit through workflow_call.
+    branches-ignore:
+      - 'upstream-base/**'
     paths:
       - 'web/**'
       - 'e2e/**'
