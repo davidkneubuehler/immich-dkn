@@ -1,6 +1,6 @@
 # Downstream maintenance and release guide
 
-This repository is an unofficial, publicly available downstream of Immich. Each branch `downstream/vX.Y.Z` carries the downstream patch on upstream tag `vX.Y.Z`, and each GitHub release `dkn-vX.Y.Z-N` publishes one of them. It is not supported by the Immich project.
+This repository is an unofficial, publicly available downstream of Immich. Each branch `downstream/vX.Y.Z` carries the downstream patch on upstream tag `vX.Y.Z`, and each GitHub release `dkn-vX.Y.Z-N` publishes one of them. The default branch `dkn` follows the newest release. It is not supported by the Immich project.
 
 ## Included change
 
@@ -10,7 +10,7 @@ The web application adds an opt-in whole-stack selection toggle. It is off by de
 
 `.github/workflows/dkn-upstream-sync.yml` runs daily and on manual dispatch. Nobody needs to check upstream by hand, and a clean upstream release is published without human steps.
 
-1. It finds the highest published, non-prerelease release of `immich-app/immich`. The current base is the upstream version named by the highest published, non-prerelease `dkn-vX.Y.Z-N` release of this repository, and the source is its branch `downstream/vX.Y.Z`. The default branch name plays no part and the workflow never changes the default branch.
+1. It finds the highest published, non-prerelease release of `immich-app/immich`. The current base is the upstream version named by the highest published, non-prerelease `dkn-vX.Y.Z-N` release of this repository, and the source is its branch `downstream/vX.Y.Z`. The default branch name plays no part and the workflow never changes which branch is the default.
 2. If that release is not newer than the base, if `sync/vX.Y.Z` or `downstream/vX.Y.Z` already exists, or if the official `immich-server` image for the release is not published yet, it stops without changing anything.
 3. Otherwise it cherry-picks the downstream commits (base tag..`downstream/<base>`) onto the upstream tag. It adds no commits of its own: `GITHUB_TOKEN` cannot push new workflow file content.
 4. On a conflict it aborts, creates no branches, and fails the run. The run summary lists the conflicting commit, the conflicting files, and the commits applied and not applied.
@@ -20,20 +20,23 @@ The web application adds an opt-in whole-stack selection toggle. It is off by de
 
 Automation never approves or merges pull requests. The commits on an automatically created `downstream/vX.Y.Z` are the unsigned cherry-picks from `sync/vX.Y.Z`; the tag is unsigned too. Their integrity rests on the protected refs, the validated candidate commit, and the keyless image signature and provenance, which name the workflow run. A review pull request is closed, not merged, after the release. Pull requests into `upstream-base/*` and `dkn-test/*` do not trigger `dkn-stack-selection.yml`, because the sync run already validates the exact candidate commit.
 
-A real run must start from a `downstream/vX.Y.Z` branch. The workflow runs with `GITHUB_TOKEN` only. No step needs a personal login, agent-git, or a stored secret.
+A real run must start from `dkn` or a `downstream/vX.Y.Z` branch. The workflow runs with `GITHUB_TOKEN` only. No step needs a personal login, agent-git, or a stored secret.
 
 ### Where the automation runs from
 
-Scheduled runs, and dispatched runs without another ref, use the workflow files on the default branch, including the called `dkn-release.yml` and `dkn-stack-selection.yml`. An automatic release is therefore signed by `https://github.com/<owner>/<repository>/.github/workflows/dkn-release.yml@refs/heads/<default branch>`; a manual tag push is signed by the same file `@refs/tags/dkn-vX.Y.Z-N`. The release body states the exact identity.
+Scheduled runs, and dispatched runs without another ref, use the workflow files on the default branch `dkn`, including the called `dkn-release.yml` and `dkn-stack-selection.yml`. An automatic release is therefore signed by `https://github.com/<owner>/<repository>/.github/workflows/dkn-release.yml@refs/heads/dkn`; a manual tag push is signed by the same file `@refs/tags/dkn-vX.Y.Z-N`. The release body states the exact identity.
 
-Changes to the downstream patch belong on the latest `downstream/vX.Y.Z`, which is the next transplant source. Changes to the automation take effect only once they are on the default branch; when the default branch is not the latest release branch, commit them to both.
+Every successful detection, including runs that find no new upstream release, ends with the `follow` job. It gives `dkn` the tree of `downstream/vX.Y.Z` for the latest published, non-prerelease `dkn-v*` release: a fast-forward when `dkn` is an ancestor of that branch, otherwise a merge commit whose tree is the release branch and whose parents are the old `dkn` head and the release branch head. `dkn` therefore never needs a forced update, and after an automatic release it carries the new release in the same run.
+
+Commit both patch changes and automation fixes to the newest `downstream/vX.Y.Z` branch only; the next run carries them to `dkn`, and the next transplant carries them to later releases. A direct commit to `dkn` is overwritten by the next `follow` run. The one exception is a fix to the `follow` job itself when it cannot run: commit that fix to both branches.
 
 ### Repository rules
 
-The automation depends on three repository rulesets:
+The automation depends on four repository rulesets:
 
 | Ruleset | Refs | Rules | Why |
 | --- | --- | --- | --- |
+| `dkn-default-branch` | `refs/heads/dkn` | Block deletion and non-fast-forward pushes. | The default branch only moves forward. Signatures are not required, because the `follow` job creates merge commits with `GITHUB_TOKEN`. |
 | `downstream-branch` | `refs/heads/downstream/*` | Block deletion and non-fast-forward pushes. | Release branches keep their history. Signatures are not required, because the upstream sync creates release branches from unsigned cherry-picks. |
 | `dkn-release-tags` | `refs/tags/dkn-v*` | Block updates and deletion. | A published release tag cannot move. Creation stays allowed for the upstream sync and manual releases. |
 | `upstream-sync-candidates` | `refs/heads/sync/*`, `refs/heads/upstream-base/*` | Block updates and non-fast-forward pushes. | A candidate cannot change after validation or review. Creation and deletion stay allowed, so the workflow deletes and recreates a stale `upstream-base/vX.Y.Z` instead of moving it, and leftover candidates can be deleted by hand. |
@@ -53,14 +56,14 @@ gh workflow run dkn-upstream-sync.yml -R <owner>/<repository> --ref dkn-test/<na
   -f source_branch=dkn-test/<name> -f base_tag=vA.B.C -f upstream_tag=vX.Y.Z
 ```
 
-A rehearsal runs the same jobs with these differences: candidate branches are named `dkn-test/<name>-sync-vX.Y.Z`, `dkn-test/<name>-upstream-base-vX.Y.Z`, and `dkn-test/<name>-downstream-vX.Y.Z`; no tag is created; and `dkn-release.yml` runs with `publish: false`, so it checks the upstream ancestry, builds linux/amd64 into the runner's Docker daemon only, generates the SBOM, runs the scan gate, uploads the evidence artifact, and writes the would-be release body to the job summary. Nothing is pushed to the registry, signed, attested, or released. `base_tag` and `upstream_tag` are accepted only with a `dkn-test/*` source; an explicit `upstream_tag` skips the "newer release" check. Delete the `dkn-test/*` branches afterwards.
+A rehearsal runs the same jobs with these differences: candidate branches are named `dkn-test/<name>-sync-vX.Y.Z`, `dkn-test/<name>-upstream-base-vX.Y.Z`, and `dkn-test/<name>-downstream-vX.Y.Z`; the `follow` job moves `dkn-test/<name>-dkn`, created at the source, instead of `dkn`; no tag is created; and `dkn-release.yml` runs with `publish: false`, so it checks the upstream ancestry, builds linux/amd64 into the runner's Docker daemon only, generates the SBOM, runs the scan gate, uploads the evidence artifact, and writes the would-be release body to the job summary. Nothing is pushed to the registry, signed, attested, or released. `base_tag` and `upstream_tag` are accepted only with a `dkn-test/*` source; an explicit `upstream_tag` skips the "newer release" check. Delete the `dkn-test/*` branches afterwards.
 
 ### Notifications
 
 | Situation | What happens | Notification |
 | --- | --- | --- |
 | No newer upstream release, or a candidate already exists | The run succeeds and does nothing. | None. |
-| Clean transplant, validation passed, no findings added | `sync/vX.Y.Z`, `downstream/vX.Y.Z`, and `dkn-vX.Y.Z-1` are created and the release is published in the same run. | Published release (release notification for watchers of this repository). If a publishing step fails, a failed-run notification instead. |
+| Clean transplant, validation passed, no findings added | `sync/vX.Y.Z`, `downstream/vX.Y.Z`, and `dkn-vX.Y.Z-1` are created, the release is published, and `dkn` follows it in the same run. | Published release (release notification for watchers of this repository). If a publishing step fails, a failed-run notification instead. |
 | Clean transplant, validation or scan comparison failed | Branches and a review pull request are created, and the run fails. | Pull request review request from `github-actions` and a failed-run notification. |
 | Conflict | The run fails with a conflict summary. It fails again on every daily run until `downstream/vX.Y.Z` exists. | Failed-run notification for `Downstream upstream sync`. |
 
@@ -73,7 +76,7 @@ GitHub disables scheduled workflows in public repositories after 60 days without
 The workflow therefore does two best-effort things on every run, without committing to `downstream/*`:
 
 - it calls the enable-workflow API for itself;
-- when the repository has had no push for 45 days, it recreates the `dkn-keepalive` branch at the default branch head and checks that the repository's last-push time moved. If it did not, the run fails, which is a notification at least 15 days before the limit.
+- when the repository has had no push for 45 days, it recreates the `dkn-keepalive` branch at the `dkn` head and checks that the repository's last-push time moved. If it did not, the run fails, which is a notification at least 15 days before the limit.
 
 Upstream releases also create branches, and every downstream release pushes a branch and a tag, which are normal repository activity. If the workflow is ever shown as disabled, re-enable it with `gh workflow enable dkn-upstream-sync.yml` and dispatch it once.
 
@@ -107,7 +110,7 @@ Use this flow when the upstream sync did not publish a release: a conflict, fail
    gh attestation verify oci://ghcr.io/<owner>/immich-server@<digest> -R <owner>/<repository>
    ```
 
-8. **Create the GitHub release** for `dkn-vX.Y.Z-1` with the digest, the source commit URL, the verification commands, the scan result, and the previous verified digest for rollback, and publish it as a non-prerelease: the next upstream sync takes its base from the latest such release. Close the review pull request. Do not change the default branch.
+8. **Create the GitHub release** for `dkn-vX.Y.Z-1` with the digest, the source commit URL, the verification commands, the scan result, and the previous verified digest for rollback, and publish it as a non-prerelease: the next upstream sync takes its base from the latest such release. Close the review pull request. The next upstream sync run moves `dkn` to the new release branch; do not change the default branch.
 
 ## Images, rollback, and source availability
 

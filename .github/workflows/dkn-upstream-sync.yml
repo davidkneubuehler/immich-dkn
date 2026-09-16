@@ -100,8 +100,8 @@ jobs:
             base_tag="${BASH_REMATCH[1]}"
             source_branch="downstream/$base_tag"
             publish=true
-            # Publishing runs only workflow files from a protected downstream branch.
-            [[ "$RUN_REF" =~ ^refs/heads/downstream/$version$ ]] || fail "A real sync publishes releases and must run from a downstream/vX.Y.Z branch, not \`$RUN_REF\`."
+            # Publishing runs only workflow files from a protected branch.
+            [[ "$RUN_REF" =~ ^refs/heads/(dkn|downstream/$version)$ ]] || fail "A real sync publishes releases and must run from dkn or a downstream/vX.Y.Z branch, not \`$RUN_REF\`."
           else
             [[ "$INPUT_SOURCE" =~ ^dkn-test/[A-Za-z0-9._-]+$ ]] || fail "The source branch \`$INPUT_SOURCE\` must be dkn-test/*. Real runs take no source branch."
             source_branch="$INPUT_SOURCE"
@@ -750,6 +750,92 @@ jobs:
             echo "::error title=Candidate not ready::Validation: $VALIDATION_RESULT, scan: $SCAN_RESULT. See the pull request and run summary."
             exit 1
           fi
+
+  follow:
+    name: Keep dkn on the newest release
+    needs: [detect, release]
+    # Runs on every successful detection, also when nothing new was released, so that
+    # fixes pushed to the newest downstream/vX.Y.Z branch reach dkn.
+    if: always() && needs.detect.result == 'success' && needs.release.result != 'failure' && needs.release.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Match dkn to the newest downstream release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          INPUT_SOURCE: ${{ inputs.source_branch }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          RELEASE_BRANCH: ${{ needs.detect.outputs.release_branch }}
+        run: |
+          set -euo pipefail
+          summary() {
+            printf '## Default branch\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+          }
+          fail() {
+            echo "::error title=Default branch::$1"
+            summary "$1"
+            exit 1
+          }
+          ref_sha() {
+            gh api "repos/$REPOSITORY/git/matching-refs/heads/$1" --jq ".[] | select(.ref == \"refs/heads/$1\") | .object.sha"
+          }
+
+          # A rehearsal follows its own release branch on dkn-test/<name>-dkn, which
+          # starts at the rehearsal source.
+          if [ -z "$INPUT_SOURCE" ]; then
+            target=dkn
+            latest=$(gh api --paginate "repos/$REPOSITORY/releases" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+              | grep -E '^dkn-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' | sort -V | tail -n 1 || true)
+            if [[ ! "$latest" =~ ^dkn-(v[0-9]+\.[0-9]+\.[0-9]+)-[0-9]+$ ]]; then
+              summary "No published downstream release was found; \`$target\` was not changed."
+              exit 0
+            fi
+            source="downstream/${BASH_REMATCH[1]}"
+            target_sha=$(ref_sha "$target")
+            if [ -z "$target_sha" ]; then
+              summary "\`$target\` does not exist; nothing was changed."
+              exit 0
+            fi
+          else
+            target="$INPUT_SOURCE-dkn"
+            if [ "$RELEASE_RESULT" != success ]; then
+              summary "The rehearsal created no release branch; \`$target\` was not changed."
+              exit 0
+            fi
+            source="$RELEASE_BRANCH"
+            target_sha=$(ref_sha "$target")
+            if [ -z "$target_sha" ]; then
+              target_sha=$(ref_sha "$INPUT_SOURCE")
+              gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/heads/$target" -f sha="$target_sha" > /dev/null
+            fi
+          fi
+
+          source_sha=$(ref_sha "$source")
+          [ -n "$source_sha" ] || fail "\`$source\` does not exist, so \`$target\` cannot follow it."
+          source_tree=$(gh api "repos/$REPOSITORY/git/commits/$source_sha" --jq .tree.sha)
+          target_tree=$(gh api "repos/$REPOSITORY/git/commits/$target_sha" --jq .tree.sha)
+          if [ "$source_tree" = "$target_tree" ]; then
+            summary "\`$target\` already has the tree of \`$source\` (\`$source_sha\`)."
+            exit 0
+          fi
+
+          # Fast-forward when possible; otherwise add a merge commit whose tree is the
+          # release branch, so dkn never needs a forced update.
+          if [ "$(gh api "repos/$REPOSITORY/compare/$target_sha...$source_sha" --jq .status)" = ahead ]; then
+            new_sha="$source_sha"
+            how="Fast-forwarded"
+          else
+            message=$(printf 'Follow %s\n\nSet the tree to %s at %s.\nUpstream sync run: %s\n' "$source" "$source" "$source_sha" "$RUN_URL")
+            new_sha=$(gh api -X POST "repos/$REPOSITORY/git/commits" -f message="$message" -f tree="$source_tree" \
+              -f "parents[]=$target_sha" -f "parents[]=$source_sha" --jq .sha)
+            how="Merged"
+          fi
+          gh api -X PATCH "repos/$REPOSITORY/git/refs/heads/$target" -f sha="$new_sha" -F force=false > /dev/null
+          summary "$how \`$target\` from \`$target_sha\` to \`$new_sha\`, matching \`$source\` (\`$source_sha\`)."
 
   keepalive:
     name: Keep the schedule active
