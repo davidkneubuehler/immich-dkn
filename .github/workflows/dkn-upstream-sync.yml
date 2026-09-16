@@ -116,6 +116,11 @@ jobs:
           target_sha=$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$target_tag" --jq .sha)
           base_sha=$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$base_tag" --jq .sha)
 
+          # Without a sync branch, an existing upstream-base branch is left over from a
+          # failed attempt. The transplant reuses it or resets it to the upstream tag.
+          stale_base_branch="upstream-base/$target_tag"
+          stale_base_sha=$(gh api "repos/$REPOSITORY/git/matching-refs/heads/$stale_base_branch" --jq ".[] | select(.ref == \"refs/heads/$stale_base_branch\") | .object.sha")
+
           {
             echo "proceed=true"
             echo "base_tag=$base_tag"
@@ -134,6 +139,11 @@ jobs:
             echo "- Downstream base: \`$base_tag\` (\`$base_sha\`)"
             echo "- Source branch: \`$source_branch\`"
             echo "- Official image: \`$upstream_image_ref@$digest\`"
+            if [ "$stale_base_sha" = "$target_sha" ]; then
+              echo "- \`$stale_base_branch\` is left over from an earlier attempt and already points at \`$target_tag\`; it is reused."
+            elif [ -n "$stale_base_sha" ]; then
+              echo "- \`$stale_base_branch\` is left over from an earlier attempt at \`$stale_base_sha\`; it is reset to \`$target_tag\`."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   prepare:
@@ -164,7 +174,6 @@ jobs:
           BASE_SHA: ${{ needs.detect.outputs.base_sha }}
           TARGET_TAG: ${{ needs.detect.outputs.target_tag }}
           TARGET_SHA: ${{ needs.detect.outputs.target_sha }}
-          UPSTREAM_IMAGE: ${{ needs.detect.outputs.upstream_image }}
         run: |
           set -euo pipefail
           fail() {
@@ -236,15 +245,6 @@ jobs:
             fi
           done
 
-          release_workflow=.github/workflows/dkn-release.yml
-          if [ -f "$release_workflow" ] && grep -q '^      UPSTREAM_IMAGE: ' "$release_workflow"; then
-            current=$(sed -n 's/^      UPSTREAM_IMAGE: //p' "$release_workflow")
-            if [ "$current" != "$UPSTREAM_IMAGE" ]; then
-              sed -i "s|^      UPSTREAM_IMAGE: .*|      UPSTREAM_IMAGE: $UPSTREAM_IMAGE|" "$release_workflow"
-              git commit --quiet -m "ci(downstream): pin upstream baseline $TARGET_TAG" -- "$release_workflow"
-            fi
-          fi
-
           delimiter="EOF_$(openssl rand -hex 8)"
           {
             echo "commits<<$delimiter"
@@ -273,8 +273,8 @@ jobs:
           if [ -z "$existing" ]; then
             gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/heads/$base_branch" -f sha="$TARGET_SHA" > /dev/null
           elif [ "$existing" != "$TARGET_SHA" ]; then
-            echo "::error title=Upstream sync failed::$base_branch exists at $existing instead of $TARGET_SHA"
-            exit 1
+            gh api -X PATCH "repos/$REPOSITORY/git/refs/heads/$base_branch" -f sha="$TARGET_SHA" -F force=true > /dev/null
+            printf '\nReset `%s` from `%s` to upstream `%s`.\n' "$base_branch" "$existing" "$TARGET_TAG" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)
