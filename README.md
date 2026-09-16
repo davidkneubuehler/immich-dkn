@@ -15,7 +15,7 @@
 <br/>
 
 > [!CAUTION]
-> This is an unofficial downstream modification of Immich, based on upstream `v3.2.1`. It is unsupported by the Immich project. The modified `immich-server` image bundles the web stack-selection patch; mobile and machine-learning artifacts remain upstream artifacts. Read [DOWNSTREAM.md](DOWNSTREAM.md) before deploying or publishing a downstream image.
+> This is an unofficial downstream modification of Immich. Each downstream release `dkn-vX.Y.Z-N` is built on upstream `vX.Y.Z`, so the latest release of this repository names the upstream version it follows. It is unsupported by the Immich project. The modified `immich-server` image bundles the web stack-selection patch; mobile and machine-learning artifacts remain upstream artifacts. Read [DOWNSTREAM.md](DOWNSTREAM.md) before deploying or publishing a downstream image.
 
 <a href="https://immich.app">
 <img src="design/immich-screenshots.png" title="Main Screenshot">
