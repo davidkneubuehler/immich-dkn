@@ -381,9 +381,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+      # Rate limits of registries and the GitHub API during the build are transient,
+      # so a failed build is retried once.
       - name: Build candidate immich-server without pushing
+        id: build
+        continue-on-error: true
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
+        with: &candidate-build
           context: .
           file: server/Dockerfile
           platforms: linux/amd64
@@ -401,6 +405,34 @@ jobs:
             BUILD_SOURCE_COMMIT=${{ needs.prepare.outputs.sync_sha }}
             BUILD_SOURCE_URL=${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.prepare.outputs.sync_sha }}
 
+      - name: Wait before retrying the build
+        if: steps.build.outcome == 'failure'
+        run: sleep 120
+
+      - name: Retry candidate build
+        if: steps.build.outcome == 'failure'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with: *candidate-build
+
+      - name: Pull official upstream image
+        id: upstream
+        env:
+          UPSTREAM_IMAGE: ${{ needs.detect.outputs.upstream_image }}
+        run: |
+          set -euo pipefail
+          # Trivy scans the local copy, so a registry rate limit only costs retries.
+          name="${UPSTREAM_IMAGE%@*}"
+          reference="${name%:*}@${UPSTREAM_IMAGE##*@}"
+          for attempt in 1 2 3 4 5; do
+            if docker pull --quiet --platform linux/amd64 "$reference"; then
+              echo "ref=$reference" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((attempt * 30))
+          done
+          echo "::error title=Upstream baseline::Could not pull $reference."
+          exit 1
+
       - name: Scan candidate image
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
@@ -415,7 +447,7 @@ jobs:
       - name: Scan official upstream image
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
-          image-ref: ${{ needs.detect.outputs.upstream_image }}
+          image-ref: ${{ steps.upstream.outputs.ref }}
           format: json
           output: trivy-upstream.json
           exit-code: '0'

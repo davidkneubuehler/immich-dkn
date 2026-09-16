@@ -129,7 +129,7 @@ jobs:
       id-token: write
       packages: write
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.image.outputs.digest }}
       upstream_image: ${{ steps.upstream.outputs.image }}
       downstream_findings: ${{ steps.findings.outputs.downstream }}
       upstream_findings: ${{ steps.findings.outputs.upstream }}
@@ -172,6 +172,16 @@ jobs:
             echo "Upstream baseline image: $reference"
             echo "Upstream baseline digest: $digest"
           } | tee immich-upstream.image >> "$GITHUB_STEP_SUMMARY"
+          # Trivy scans the local copy, so a registry rate limit only costs retries.
+          for attempt in 1 2 3 4 5; do
+            if docker pull --quiet --platform linux/amd64 "${reference%:*}@$digest"; then
+              echo "local=${reference%:*}@$digest" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((attempt * 30))
+          done
+          echo "::error title=Upstream baseline::Could not pull ${reference%:*}@$digest."
+          exit 1
 
       - name: Login to GitHub Container Registry
         if: needs.source.outputs.publish == 'true'
@@ -196,10 +206,13 @@ jobs:
 
       # Without publish, the image is built for linux/amd64 and loaded into the
       # runner's Docker daemon so that the SBOM and scans run on the same build.
+      # Rate limits of registries and the GitHub API during the build are
+      # transient, so a failed build is retried once.
       - name: Build immich-server
         id: build
+        continue-on-error: true
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
+        with: &release-build
           context: .
           file: server/Dockerfile
           platforms: ${{ needs.source.outputs.publish == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
@@ -222,12 +235,23 @@ jobs:
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
 
+      - name: Wait before retrying the build
+        if: steps.build.outcome == 'failure'
+        run: sleep 120
+
+      - name: Retry immich-server build
+        id: build-retry
+        if: steps.build.outcome == 'failure'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with: *release-build
+
       - name: Resolve built image reference
         id: image
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.build-retry.outputs.digest || steps.build.outputs.digest }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/immich-server
         run: |
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           if [ "$PUBLISH" = true ]; then
             echo "ref=$IMAGE@$DIGEST" >> "$GITHUB_OUTPUT"
           else
@@ -257,7 +281,7 @@ jobs:
       - name: Scan upstream baseline image for vulnerabilities
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
-          image-ref: ${{ steps.upstream.outputs.image }}
+          image-ref: ${{ steps.upstream.outputs.local }}
           format: json
           output: trivy-upstream.json
           exit-code: '0'
@@ -268,7 +292,7 @@ jobs:
       - name: Record image digest and new findings
         id: findings
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.image.outputs.digest }}
           UPSTREAM_IMAGE: ${{ steps.upstream.outputs.image }}
         run: |
           echo "$DIGEST" > immich-server.digest
@@ -316,7 +340,7 @@ jobs:
       - name: Sign image by keyless identity
         if: needs.source.outputs.publish == 'true'
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.image.outputs.digest }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/immich-server
         run: cosign sign --yes "$IMAGE@$DIGEST"
 
@@ -326,7 +350,7 @@ jobs:
         id: identity
         if: needs.source.outputs.publish == 'true'
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.image.outputs.digest }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/immich-server
           IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/dkn-release.yml@${{ github.ref }}
         run: |
@@ -342,14 +366,15 @@ jobs:
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/immich-server
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
 
   release:
     name: Create GitHub release
     needs: [source, publish]
-    # A tag push leaves the GitHub release to the manual flow in DOWNSTREAM.md.
-    if: ${{ inputs.tag }}
+    # A tag push leaves the GitHub release to the manual flow in DOWNSTREAM.md. The
+    # status checks are explicit because the skipped validation job would skip this job.
+    if: ${{ !cancelled() && inputs.tag && needs.source.result == 'success' && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
