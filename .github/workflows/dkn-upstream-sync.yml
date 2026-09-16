@@ -7,13 +7,18 @@ on:
     - cron: '17 5 * * *'
   workflow_dispatch:
     inputs:
-      upstream_tag:
-        description: 'Upstream release tag to target, for testing (for example v3.2.1). Empty selects the latest release.'
+      source_branch:
+        description: 'dkn-test/* branch for a rehearsal that publishes nothing. Empty runs the real sync from the latest downstream release.'
         required: false
         type: string
         default: ''
-      source_branch:
-        description: 'Branch whose downstream commits are transplanted, for testing (downstream/vX.Y.Z or dkn-test/*). Empty selects the default branch.'
+      base_tag:
+        description: 'Rehearsal only: upstream release the source branch is based on (for example v3.2.1). Empty uses the latest downstream release.'
+        required: false
+        type: string
+        default: ''
+      upstream_tag:
+        description: 'Rehearsal only: upstream release tag to target (for example v3.2.2). Empty selects the latest release.'
         required: false
         type: string
         default: ''
@@ -36,6 +41,7 @@ jobs:
       contents: read
     outputs:
       proceed: ${{ steps.detect.outputs.proceed }}
+      publish: ${{ steps.detect.outputs.publish }}
       base_tag: ${{ steps.detect.outputs.base_tag }}
       base_sha: ${{ steps.detect.outputs.base_sha }}
       base_published_at: ${{ steps.detect.outputs.base_published_at }}
@@ -43,16 +49,22 @@ jobs:
       target_sha: ${{ steps.detect.outputs.target_sha }}
       release_url: ${{ steps.detect.outputs.release_url }}
       source_branch: ${{ steps.detect.outputs.source_branch }}
+      sync_branch: ${{ steps.detect.outputs.sync_branch }}
+      base_branch: ${{ steps.detect.outputs.base_branch }}
+      release_branch: ${{ steps.detect.outputs.release_branch }}
+      release_tag: ${{ steps.detect.outputs.release_tag }}
       upstream_image: ${{ steps.detect.outputs.upstream_image }}
+      advisories: ${{ steps.advisories.outputs.advisories }}
     steps:
       - name: Compare the downstream base with upstream releases
         id: detect
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          INPUT_TAG: ${{ inputs.upstream_tag }}
           INPUT_SOURCE: ${{ inputs.source_branch }}
+          INPUT_BASE: ${{ inputs.base_tag }}
+          INPUT_TAG: ${{ inputs.upstream_tag }}
+          RUN_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           fail() {
@@ -65,25 +77,42 @@ jobs:
             printf '## No action needed\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           }
+          version='v[0-9]+\.[0-9]+\.[0-9]+'
 
-          if [[ ! "$DEFAULT_BRANCH" =~ ^downstream/(v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            fail "The default branch \`$DEFAULT_BRANCH\` does not name an upstream release (expected downstream/vX.Y.Z)."
-          fi
-          base_tag="${BASH_REMATCH[1]}"
+          # The latest published, non-prerelease downstream release names the current base.
+          latest_release=$(gh api --paginate "repos/$REPOSITORY/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | grep -E "^dkn-$version-[0-9]+\$" | sort -V | tail -n 1 || true)
 
-          source_branch="${INPUT_SOURCE:-$DEFAULT_BRANCH}"
-          if [[ ! "$source_branch" =~ ^(downstream/v[0-9]+\.[0-9]+\.[0-9]+|dkn-test/[A-Za-z0-9._-]+)$ ]]; then
-            fail "The source branch \`$source_branch\` must be downstream/vX.Y.Z or dkn-test/*."
+          if [ -z "$INPUT_SOURCE" ]; then
+            [ -z "$INPUT_BASE$INPUT_TAG" ] || fail "\`base_tag\` and \`upstream_tag\` are only accepted with a dkn-test/* \`source_branch\`."
+            [[ "$latest_release" =~ ^dkn-($version)-[0-9]+$ ]] || fail "No published, non-prerelease dkn-vX.Y.Z-N release was found to derive the downstream base from."
+            base_tag="${BASH_REMATCH[1]}"
+            source_branch="downstream/$base_tag"
+            publish=true
+            # Publishing runs only workflow files from a protected downstream branch.
+            [[ "$RUN_REF" =~ ^refs/heads/downstream/$version$ ]] || fail "A real sync publishes releases and must run from a downstream/vX.Y.Z branch, not \`$RUN_REF\`."
+          else
+            [[ "$INPUT_SOURCE" =~ ^dkn-test/[A-Za-z0-9._-]+$ ]] || fail "The source branch \`$INPUT_SOURCE\` must be dkn-test/*. Real runs take no source branch."
+            source_branch="$INPUT_SOURCE"
+            publish=false
+            if [ -n "$INPUT_BASE" ]; then
+              [[ "$INPUT_BASE" =~ ^$version$ ]] || fail "The base tag input \`$INPUT_BASE\` must look like vX.Y.Z."
+              base_tag="$INPUT_BASE"
+            else
+              [[ "$latest_release" =~ ^dkn-($version)-[0-9]+$ ]] || fail "No downstream release was found; pass \`base_tag\`."
+              base_tag="${BASH_REMATCH[1]}"
+            fi
           fi
+          gh api "repos/$REPOSITORY/git/matching-refs/heads/$source_branch" --jq '.[].ref' | grep -qx "refs/heads/$source_branch" \
+            || fail "The source branch \`$source_branch\` does not exist."
 
           gh api --paginate "repos/$UPSTREAM_REPOSITORY/releases?per_page=100" \
             --jq '.[] | select(.draft == false and .prerelease == false) | [.tag_name, .html_url, .published_at] | @tsv' \
             > releases.tsv
 
           if [ -n "$INPUT_TAG" ]; then
-            if [[ ! "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              fail "The upstream tag input \`$INPUT_TAG\` must look like vX.Y.Z."
-            fi
+            [[ "$INPUT_TAG" =~ ^$version$ ]] || fail "The upstream tag input \`$INPUT_TAG\` must look like vX.Y.Z."
             release=$(awk -F '\t' -v tag="$INPUT_TAG" '$1 == tag' releases.tsv)
             [ -n "$release" ] || fail "\`$INPUT_TAG\` is not a published, non-prerelease release of $UPSTREAM_REPOSITORY."
           else
@@ -98,11 +127,21 @@ jobs:
             if [ "$target_tag" = "$base_tag" ] || [ "$newest" = "$base_tag" ]; then
               skip "The downstream base \`$base_tag\` is already the latest upstream release (\`$target_tag\`, published $target_published_at)."
             fi
-            candidates=("sync/$target_tag" "downstream/$target_tag")
-          else
-            candidates=("sync/$target_tag")
           fi
-          for branch in "${candidates[@]}"; do
+
+          # A rehearsal uses branches under its dkn-test/* source and never creates a tag.
+          if [ "$publish" = true ]; then
+            sync_branch="sync/$target_tag"
+            base_branch="upstream-base/$target_tag"
+            release_branch="downstream/$target_tag"
+          else
+            sync_branch="$source_branch-sync-$target_tag"
+            base_branch="$source_branch-upstream-base-$target_tag"
+            release_branch="$source_branch-downstream-$target_tag"
+          fi
+          release_tag="dkn-$target_tag-1"
+
+          for branch in "$sync_branch" "$release_branch"; do
             if gh api "repos/$REPOSITORY/git/matching-refs/heads/$branch" --jq '.[].ref' | grep -qx "refs/heads/$branch"; then
               skip "A candidate for upstream \`$target_tag\` already exists: branch \`$branch\`."
             fi
@@ -117,12 +156,12 @@ jobs:
           base_sha=$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$base_tag" --jq .sha)
 
           # Without a sync branch, an existing upstream-base branch is left over from a
-          # failed attempt. The transplant reuses it or resets it to the upstream tag.
-          stale_base_branch="upstream-base/$target_tag"
-          stale_base_sha=$(gh api "repos/$REPOSITORY/git/matching-refs/heads/$stale_base_branch" --jq ".[] | select(.ref == \"refs/heads/$stale_base_branch\") | .object.sha")
+          # failed attempt. The review pull request reuses it or resets it to the upstream tag.
+          stale_base_sha=$(gh api "repos/$REPOSITORY/git/matching-refs/heads/$base_branch" --jq ".[] | select(.ref == \"refs/heads/$base_branch\") | .object.sha")
 
           {
             echo "proceed=true"
+            echo "publish=$publish"
             echo "base_tag=$base_tag"
             echo "base_sha=$base_sha"
             echo "base_published_at=$base_published_at"
@@ -130,21 +169,63 @@ jobs:
             echo "target_sha=$target_sha"
             echo "release_url=$release_url"
             echo "source_branch=$source_branch"
+            echo "sync_branch=$sync_branch"
+            echo "base_branch=$base_branch"
+            echo "release_branch=$release_branch"
+            echo "release_tag=$release_tag"
             echo "upstream_image=$upstream_image_ref@$digest"
           } >> "$GITHUB_OUTPUT"
           {
             echo "## Upstream release candidate"
             echo
+            if [ "$publish" != true ]; then
+              echo "**Rehearsal from \`$source_branch\`.** A clean candidate creates \`$release_branch\` and a dry release run; no tag, image, or GitHub release is published."
+              echo
+            fi
             echo "- Upstream release: [\`$target_tag\`]($release_url), published $target_published_at"
-            echo "- Downstream base: \`$base_tag\` (\`$base_sha\`)"
+            if [ -n "$INPUT_BASE" ]; then
+              echo "- Downstream base: \`$base_tag\` (\`$base_sha\`), from the \`base_tag\` input"
+            else
+              echo "- Downstream base: \`$base_tag\` (\`$base_sha\`), from release \`$latest_release\`"
+            fi
             echo "- Source branch: \`$source_branch\`"
             echo "- Official image: \`$upstream_image_ref@$digest\`"
+            echo "- On a clean candidate: branch \`$release_branch\`, tag \`$release_tag\`"
             if [ "$stale_base_sha" = "$target_sha" ]; then
-              echo "- \`$stale_base_branch\` is left over from an earlier attempt and already points at \`$target_tag\`; it is reused."
+              echo "- \`$base_branch\` is left over from an earlier attempt and already points at \`$target_tag\`; a review pull request reuses it."
             elif [ -n "$stale_base_sha" ]; then
-              echo "- \`$stale_base_branch\` is left over from an earlier attempt at \`$stale_base_sha\`; it is reset to \`$target_tag\`."
+              echo "- \`$base_branch\` is left over from an earlier attempt at \`$stale_base_sha\`; a review pull request resets it to \`$target_tag\`."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect upstream security advisories
+        id: advisories
+        if: steps.detect.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_TAG: ${{ steps.detect.outputs.base_tag }}
+          BASE_PUBLISHED_AT: ${{ steps.detect.outputs.base_published_at }}
+          TARGET_TAG: ${{ steps.detect.outputs.target_tag }}
+        run: |
+          set -euo pipefail
+          referenced=""
+          if gh api "repos/$UPSTREAM_REPOSITORY/releases/tags/$TARGET_TAG" --jq '.body // ""' > release-body.md; then
+            referenced=$(grep -oE 'GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}' release-body.md | sort -u | tr '\n' ' ' || true)
+          fi
+          if gh api --paginate "repos/$UPSTREAM_REPOSITORY/security-advisories?state=published&per_page=100" \
+            --jq '.[] | [.ghsa_id, .severity, .published_at, .html_url, .summary] | @tsv' > advisories.tsv; then
+            advisories=$(awk -F '\t' -v since="$BASE_PUBLISHED_AT" -v referenced=" $referenced " \
+              '($3 > since) || index(referenced, " " $1 " ") { printf "- [%s](%s) %s, published %s: %s\n", $1, $4, $2, substr($3, 1, 10), $5 }' advisories.tsv)
+            [ -n "$advisories" ] || advisories="- None published since \`$BASE_TAG\` or referenced in the release notes."
+          else
+            advisories="- The upstream security advisories could not be retrieved; check the upstream advisories page."
+          fi
+          delimiter="EOF_$(openssl rand -hex 8)"
+          {
+            echo "advisories<<$delimiter"
+            echo "$advisories"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
 
   prepare:
     name: Transplant downstream commits
@@ -155,8 +236,6 @@ jobs:
       contents: write
     outputs:
       sync_sha: ${{ steps.push.outputs.sync_sha }}
-      sync_branch: ${{ steps.push.outputs.sync_branch }}
-      base_branch: ${{ steps.push.outputs.base_branch }}
       commits: ${{ steps.transplant.outputs.commits }}
     steps:
       - name: Checkout source branch
@@ -257,37 +336,21 @@ jobs:
             git log --reverse --format='- `%h` %s' "$TARGET_SHA..HEAD"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Create candidate branches
+      - name: Create candidate branch
         id: push
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          TARGET_TAG: ${{ needs.detect.outputs.target_tag }}
-          TARGET_SHA: ${{ needs.detect.outputs.target_sha }}
+          SYNC_BRANCH: ${{ needs.detect.outputs.sync_branch }}
         run: |
           set -euo pipefail
-          base_branch="upstream-base/$TARGET_TAG"
-          sync_branch="sync/$TARGET_TAG"
-
-          existing=$(gh api "repos/$REPOSITORY/git/matching-refs/heads/$base_branch" --jq ".[] | select(.ref == \"refs/heads/$base_branch\") | .object.sha")
-          if [ -z "$existing" ]; then
-            gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/heads/$base_branch" -f sha="$TARGET_SHA" > /dev/null
-          elif [ "$existing" != "$TARGET_SHA" ]; then
-            gh api -X PATCH "repos/$REPOSITORY/git/refs/heads/$base_branch" -f sha="$TARGET_SHA" -F force=true > /dev/null
-            printf '\nReset `%s` from `%s` to upstream `%s`.\n' "$base_branch" "$existing" "$TARGET_TAG" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)
           echo "::add-mask::$auth"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
-            push --quiet "https://github.com/$REPOSITORY.git" "HEAD:refs/heads/$sync_branch"
+            push --quiet "https://github.com/$REPOSITORY.git" "HEAD:refs/heads/$SYNC_BRANCH"
 
-          {
-            echo "sync_sha=$(git rev-parse HEAD)"
-            echo "sync_branch=$sync_branch"
-            echo "base_branch=$base_branch"
-          } >> "$GITHUB_OUTPUT"
-          printf '\nCreated `%s` at upstream `%s` and `%s` at `%s`.\n' "$base_branch" "$TARGET_TAG" "$sync_branch" "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "sync_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          printf '\nCreated `%s` at `%s`.\n' "$SYNC_BRANCH" "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
 
   validation:
     name: Focused validation
@@ -334,7 +397,7 @@ jobs:
             BUILD_IMAGE_URL=${{ github.server_url }}/${{ github.repository }}/pkgs/container/immich-server
             BUILD_REPOSITORY=${{ github.repository }}
             BUILD_REPOSITORY_URL=${{ github.server_url }}/${{ github.repository }}
-            BUILD_SOURCE_REF=${{ needs.prepare.outputs.sync_branch }}
+            BUILD_SOURCE_REF=${{ needs.detect.outputs.sync_branch }}
             BUILD_SOURCE_COMMIT=${{ needs.prepare.outputs.sync_sha }}
             BUILD_SOURCE_URL=${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.prepare.outputs.sync_sha }}
 
@@ -424,15 +487,134 @@ jobs:
             exit 1
           fi
 
+  release-refs:
+    name: Create release branch and tag
+    needs: [detect, prepare, validation, scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      notes: ${{ steps.refs.outputs.notes }}
+    steps:
+      - name: Create the release branch and tag at the validated candidate
+        id: refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PUBLISH: ${{ needs.detect.outputs.publish }}
+          BASE_TAG: ${{ needs.detect.outputs.base_tag }}
+          TARGET_TAG: ${{ needs.detect.outputs.target_tag }}
+          TARGET_SHA: ${{ needs.detect.outputs.target_sha }}
+          RELEASE_URL: ${{ needs.detect.outputs.release_url }}
+          SOURCE_BRANCH: ${{ needs.detect.outputs.source_branch }}
+          SYNC_BRANCH: ${{ needs.detect.outputs.sync_branch }}
+          RELEASE_BRANCH: ${{ needs.detect.outputs.release_branch }}
+          RELEASE_TAG: ${{ needs.detect.outputs.release_tag }}
+          ADVISORIES: ${{ needs.detect.outputs.advisories }}
+          SYNC_SHA: ${{ needs.prepare.outputs.sync_sha }}
+          COMMITS: ${{ needs.prepare.outputs.commits }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error title=Release refs::$1"
+            printf '## Release refs not created\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          ref_sha() {
+            gh api "repos/$REPOSITORY/git/matching-refs/$1" --jq ".[] | select(.ref == \"refs/$1\") | .object.sha"
+          }
+
+          # A re-run reuses refs from an earlier attempt only if they point at the candidate.
+          existing=$(ref_sha "heads/$RELEASE_BRANCH")
+          if [ -z "$existing" ]; then
+            gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/heads/$RELEASE_BRANCH" -f sha="$SYNC_SHA" > /dev/null
+          elif [ "$existing" != "$SYNC_SHA" ]; then
+            fail "\`$RELEASE_BRANCH\` already exists at \`$existing\`, not at the candidate \`$SYNC_SHA\`."
+          fi
+          printf '## Release refs\n\n- Branch `%s` at `%s`\n' "$RELEASE_BRANCH" "$SYNC_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$PUBLISH" = true ]; then
+            existing=$(ref_sha "tags/$RELEASE_TAG")
+            if [ -z "$existing" ]; then
+              message=$(printf '%s\n\nUnofficial downstream of Immich %s.\nUpstream base: %s (%s)\nDownstream commits: %s..%s\n\nCreated by the upstream sync after validation and the scan comparison passed:\n%s\n' \
+                "$RELEASE_TAG" "$TARGET_TAG" "$TARGET_TAG" "$TARGET_SHA" "$TARGET_SHA" "$SYNC_SHA" "$RUN_URL")
+              tag_object=$(gh api -X POST "repos/$REPOSITORY/git/tags" -f tag="$RELEASE_TAG" -f message="$message" \
+                -f object="$SYNC_SHA" -f type=commit --jq .sha)
+              gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/tags/$RELEASE_TAG" -f sha="$tag_object" > /dev/null
+            else
+              tag_commit="$existing"
+              if [ "$(gh api "repos/$REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.type)" = tag ]; then
+                tag_commit=$(gh api "repos/$REPOSITORY/git/tags/$existing" --jq .object.sha)
+              fi
+              [ "$tag_commit" = "$SYNC_SHA" ] || fail "\`$RELEASE_TAG\` already exists at \`$tag_commit\`, not at the candidate \`$SYNC_SHA\`."
+            fi
+            printf -- '- Tag `%s` at `%s`\n' "$RELEASE_TAG" "$SYNC_SHA" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf -- '- Rehearsal: tag `%s` not created\n' "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          delimiter="EOF_$(openssl rand -hex 8)"
+          {
+            echo "notes<<$delimiter"
+            echo "## Upstream"
+            echo
+            echo "- Release notes: $RELEASE_URL"
+            echo "- Previous downstream base: \`$BASE_TAG\`"
+            echo
+            echo "### Security advisories"
+            echo
+            echo "$ADVISORIES"
+            echo
+            echo "## Transplanted commits"
+            echo
+            echo "Transplanted from \`$SOURCE_BRANCH\` without conflicts as \`$SYNC_BRANCH\` by upstream sync run $RUN_URL."
+            echo
+            echo "$COMMITS"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish downstream release
+    needs: [detect, prepare, release-refs]
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    uses: ./.github/workflows/dkn-release.yml
+    with:
+      tag: ${{ needs.detect.outputs.release_tag }}
+      commit: ${{ needs.prepare.outputs.sync_sha }}
+      publish: ${{ needs.detect.outputs.publish == 'true' }}
+      notes: ${{ needs.release-refs.outputs.notes }}
+
   pull-request:
     name: Open review pull request
     needs: [detect, prepare, validation, scan]
-    if: always() && needs.prepare.result == 'success'
+    if: always() && needs.prepare.result == 'success' && (needs.validation.result != 'success' || needs.scan.result != 'success')
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
     steps:
+      - name: Create the review base branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_BRANCH: ${{ needs.detect.outputs.base_branch }}
+          TARGET_TAG: ${{ needs.detect.outputs.target_tag }}
+          TARGET_SHA: ${{ needs.detect.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/$REPOSITORY/git/matching-refs/heads/$BASE_BRANCH" --jq ".[] | select(.ref == \"refs/heads/$BASE_BRANCH\") | .object.sha")
+          if [ -z "$existing" ]; then
+            gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/heads/$BASE_BRANCH" -f sha="$TARGET_SHA" > /dev/null
+          elif [ "$existing" != "$TARGET_SHA" ]; then
+            gh api -X PATCH "repos/$REPOSITORY/git/refs/heads/$BASE_BRANCH" -f sha="$TARGET_SHA" -F force=true > /dev/null
+            printf '\nReset `%s` from `%s` to upstream `%s`.\n' "$BASE_BRANCH" "$existing" "$TARGET_TAG" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Open pull request for review
         env:
           GH_TOKEN: ${{ github.token }}
@@ -440,14 +622,14 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           BASE_TAG: ${{ needs.detect.outputs.base_tag }}
-          BASE_PUBLISHED_AT: ${{ needs.detect.outputs.base_published_at }}
           TARGET_TAG: ${{ needs.detect.outputs.target_tag }}
           RELEASE_URL: ${{ needs.detect.outputs.release_url }}
           SOURCE_BRANCH: ${{ needs.detect.outputs.source_branch }}
           UPSTREAM_IMAGE: ${{ needs.detect.outputs.upstream_image }}
-          SYNC_BRANCH: ${{ needs.prepare.outputs.sync_branch }}
+          ADVISORIES: ${{ needs.detect.outputs.advisories }}
+          SYNC_BRANCH: ${{ needs.detect.outputs.sync_branch }}
+          BASE_BRANCH: ${{ needs.detect.outputs.base_branch }}
           SYNC_SHA: ${{ needs.prepare.outputs.sync_sha }}
-          BASE_BRANCH: ${{ needs.prepare.outputs.base_branch }}
           COMMITS: ${{ needs.prepare.outputs.commits }}
           VALIDATION_RESULT: ${{ needs.validation.result }}
           SCAN_RESULT: ${{ needs.scan.result }}
@@ -462,23 +644,10 @@ jobs:
             esac
           }
 
-          referenced=""
-          if gh api "repos/$UPSTREAM_REPOSITORY/releases/tags/$TARGET_TAG" --jq '.body // ""' > release-body.md; then
-            referenced=$(grep -oE 'GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}' release-body.md | sort -u | tr '\n' ' ' || true)
-          fi
-          if gh api --paginate "repos/$UPSTREAM_REPOSITORY/security-advisories?state=published&per_page=100" \
-            --jq '.[] | [.ghsa_id, .severity, .published_at, .html_url, .summary] | @tsv' > advisories.tsv; then
-            advisories=$(awk -F '\t' -v since="$BASE_PUBLISHED_AT" -v referenced=" $referenced " \
-              '($3 > since) || index(referenced, " " $1 " ") { printf "- [%s](%s) %s, published %s: %s\n", $1, $4, $2, substr($3, 1, 10), $5 }' advisories.tsv)
-            [ -n "$advisories" ] || advisories="- None published since \`$BASE_TAG\` or referenced in the release notes."
-          else
-            advisories="- The upstream security advisories could not be retrieved; check the upstream advisories page."
-          fi
-
           {
             echo "Upstream released [Immich \`$TARGET_TAG\`]($RELEASE_URL). This pull request shows the downstream patch transplanted from \`$SOURCE_BRANCH\` onto that release, so its diff is exactly the downstream change."
             echo
-            echo "**Review only. Do not merge.** Publishing stays manual; follow the release flow in DOWNSTREAM.md."
+            echo "**Review only. Do not merge.** Validation or the scan comparison did not pass, so nothing was published automatically; follow the release flow in DOWNSTREAM.md."
             echo
             echo "## Upstream"
             echo
@@ -488,7 +657,7 @@ jobs:
             echo
             echo "### Security advisories"
             echo
-            echo "$advisories"
+            echo "$ADVISORIES"
             echo
             echo "## Transplanted commits"
             echo
