@@ -31,6 +31,9 @@ concurrency:
 
 permissions: {}
 
+env:
+  TRIVY_VERSION: v0.69.3
+
 jobs:
   source:
     name: Verify release source
@@ -152,6 +155,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+      # Log in before any GHCR request: authenticated pulls of the official image and
+      # the build's base images avoid the anonymous rate limit of shared runners.
+      # A dry run logs in too but pushes nothing.
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+
       - name: Resolve official upstream image
         id: upstream
         env:
@@ -182,14 +195,6 @@ jobs:
           done
           echo "::error title=Upstream baseline::Could not pull ${reference%:*}@$digest."
           exit 1
-
-      - name: Login to GitHub Container Registry
-        if: needs.source.outputs.publish == 'true'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ github.token }}
 
       - name: Generate image metadata
         id: metadata
@@ -265,7 +270,7 @@ jobs:
           image-ref: ${{ steps.image.outputs.ref }}
           format: cyclonedx
           output: immich-server-sbom.cdx.json
-          version: v0.69.3
+          version: ${{ env.TRIVY_VERSION }}
 
       - name: Scan downstream image for vulnerabilities
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
@@ -276,7 +281,7 @@ jobs:
           exit-code: '0'
           ignore-unfixed: true
           severity: HIGH,CRITICAL
-          version: v0.69.3
+          version: ${{ env.TRIVY_VERSION }}
 
       - name: Scan upstream baseline image for vulnerabilities
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
@@ -287,7 +292,7 @@ jobs:
           exit-code: '0'
           ignore-unfixed: true
           severity: HIGH,CRITICAL
-          version: v0.69.3
+          version: ${{ env.TRIVY_VERSION }}
 
       - name: Record image digest and new findings
         id: findings
@@ -456,7 +461,7 @@ jobs:
             echo "gh attestation verify oci://$image@$DIGEST -R $REPOSITORY"
             echo '```'
             echo
-            echo "Vulnerability gate: Trivy v0.69.3 found $DOWNSTREAM_FINDINGS fixable HIGH/CRITICAL findings in this image and $UPSTREAM_FINDINGS in the official \`$UPSTREAM_IMAGE\`, with 0 added by the downstream. The release run resolved that baseline digest from the tag. The CycloneDX SBOM, digest, baseline image and both scan reports are attached here and to release run $RUN_URL."
+            echo "Vulnerability gate: Trivy $TRIVY_VERSION found $DOWNSTREAM_FINDINGS fixable HIGH/CRITICAL findings in this image and $UPSTREAM_FINDINGS in the official \`$UPSTREAM_IMAGE\`, with 0 added by the downstream. The release run resolved that baseline digest from the tag. The CycloneDX SBOM, digest, baseline image and both scan reports are attached here and to release run $RUN_URL."
             echo
             echo "## Rollback"
             echo

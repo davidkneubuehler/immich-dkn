@@ -10,10 +10,12 @@ on:
         type: string
         default: ''
   pull_request:
-    # Review pull requests from the upstream sync target upstream-base/*. The sync
-    # workflow already validates the exact candidate commit through workflow_call.
+    # Review pull requests from the upstream sync target upstream-base/*, and those of
+    # rehearsals target dkn-test/*. The sync workflow already validates the exact
+    # candidate commit through workflow_call.
     branches-ignore:
       - 'upstream-base/**'
+      - 'dkn-test/**'
     paths:
       - 'web/**'
       - 'e2e/**'
