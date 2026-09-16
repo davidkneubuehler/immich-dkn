@@ -55,6 +55,10 @@ vi.mock(import('$lib/managers/feature-flags-manager.svelte'), function () {
 });
 
 describe('AssetService', () => {
+  it('fails on purpose to rehearse the review pull request path', () => {
+    expect(true).toBe(false);
+  });
+
   describe('getAssetBulkActions', () => {
     beforeEach(() => {
       vitest.clearAllMocks();
