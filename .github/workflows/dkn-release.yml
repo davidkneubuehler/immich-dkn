@@ -4,48 +4,149 @@ on:
   push:
     tags:
       - 'dkn-v*'
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Downstream release tag (dkn-vX.Y.Z-N). It must already point at the commit unless publish is false.'
+        required: true
+        type: string
+      commit:
+        description: 'Commit to release. The caller has already validated it.'
+        required: true
+        type: string
+      publish:
+        description: 'Push, sign and attest the image and create the GitHub release. False builds and scans linux/amd64 only.'
+        required: false
+        type: boolean
+        default: true
+      notes:
+        description: 'Markdown about the upstream release and the transplant, added to the GitHub release body.'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: dkn-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions: {}
 
 jobs:
+  source:
+    name: Verify release source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      upstream_version: ${{ steps.version.outputs.upstream_version }}
+      upstream_commit: ${{ steps.source.outputs.upstream_commit }}
+      commit: ${{ steps.source.outputs.commit }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - name: Validate downstream tag
+        id: version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          # A tag push always publishes. A caller decides with the publish input.
+          PUBLISH: ${{ !inputs.tag || inputs.publish }}
+        run: |
+          if [[ ! "$TAG" =~ ^dkn-(v[0-9]+\.[0-9]+\.[0-9]+)([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid downstream tag: $TAG" >&2
+            exit 1
+          fi
+          {
+            echo "version=$TAG"
+            echo "upstream_version=${BASH_REMATCH[1]}"
+            echo "publish=$PUBLISH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Check the tag and the upstream base
+        id: source
+        env:
+          TAG: ${{ steps.version.outputs.version }}
+          UPSTREAM_VERSION: ${{ steps.version.outputs.upstream_version }}
+          PUBLISH: ${{ steps.version.outputs.publish }}
+          EXPECTED_COMMIT: ${{ inputs.commit || github.sha }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error title=Release source::$1"
+            printf '## Release source rejected\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+
+          commit=$(git rev-parse HEAD)
+          [ "$commit" = "$EXPECTED_COMMIT" ] || fail "Checked out \`$commit\`, expected \`$EXPECTED_COMMIT\`."
+          if [ "$PUBLISH" = true ]; then
+            tag_commit=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}") || fail "Tag \`$TAG\` does not exist in this repository."
+            [ "$tag_commit" = "$commit" ] || fail "Tag \`$TAG\` points at \`$tag_commit\`, not at \`$commit\`."
+          fi
+
+          git fetch --quiet --no-tags --filter=blob:none https://github.com/immich-app/immich.git "refs/tags/$UPSTREAM_VERSION" \
+            || fail "Upstream tag \`$UPSTREAM_VERSION\` could not be fetched from immich-app/immich."
+          upstream_commit=$(git rev-parse 'FETCH_HEAD^{commit}')
+          git merge-base --is-ancestor "$upstream_commit" "$commit" \
+            || fail "\`$commit\` does not contain upstream \`$UPSTREAM_VERSION\` (\`$upstream_commit\`), which the tag \`$TAG\` names."
+
+          {
+            echo "commit=$commit"
+            echo "upstream_commit=$upstream_commit"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "Release tag: $TAG"
+            echo "Release commit: $commit"
+            echo "Upstream $UPSTREAM_VERSION: $upstream_commit (ancestor of the release commit)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   validation:
     name: Validate downstream changes
+    needs: source
+    # The upstream sync validates the exact commit before it calls this workflow.
+    if: ${{ !inputs.tag }}
     permissions:
       contents: read
     uses: ./.github/workflows/dkn-stack-selection.yml
+    with:
+      ref: ${{ needs.source.outputs.commit }}
 
   publish:
     name: Build and publish immich-server
-    needs: validation
+    needs: [source, validation]
+    if: ${{ !cancelled() && needs.source.result == 'success' && (needs.validation.result == 'success' || needs.validation.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       attestations: write
       contents: read
       id-token: write
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      upstream_image: ${{ steps.upstream.outputs.image }}
+      downstream_findings: ${{ steps.findings.outputs.downstream }}
+      upstream_findings: ${{ steps.findings.outputs.upstream }}
+      identity: ${{ steps.identity.outputs.identity }}
+    env:
+      PUBLISH: ${{ needs.source.outputs.publish }}
+      VERSION: ${{ needs.source.outputs.version }}
+      COMMIT: ${{ needs.source.outputs.commit }}
     steps:
-      - name: Validate downstream tag
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          if [[ ! "$TAG" =~ ^dkn-(v[0-9]+\.[0-9]+\.[0-9]+)([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid downstream tag: $TAG" >&2
-            exit 1
-          fi
-          echo "version=$TAG" >> "$GITHUB_OUTPUT"
-          echo "upstream_version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-        id: version
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
 
       - name: Set up QEMU
+        if: needs.source.outputs.publish == 'true'
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
@@ -54,7 +155,7 @@ jobs:
       - name: Resolve official upstream image
         id: upstream
         env:
-          UPSTREAM_VERSION: ${{ steps.version.outputs.upstream_version }}
+          UPSTREAM_VERSION: ${{ needs.source.outputs.upstream_version }}
         run: |
           set -euo pipefail
           reference="ghcr.io/immich-app/immich-server:$UPSTREAM_VERSION"
@@ -73,6 +174,7 @@ jobs:
           } | tee immich-upstream.image >> "$GITHUB_STEP_SUMMARY"
 
       - name: Login to GitHub Container Registry
+        if: needs.source.outputs.publish == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -83,44 +185,60 @@ jobs:
         id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/immich-server
-          tags: type=raw,value=${{ steps.version.outputs.version }}
+          images: ${{ needs.source.outputs.publish == 'true' && format('ghcr.io/{0}/immich-server', github.repository_owner) || 'immich-server' }}
+          tags: type=raw,value=${{ needs.source.outputs.version }}
           flavor: latest=false
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.source.outputs.commit }}
+            org.opencontainers.image.version=${{ needs.source.outputs.version }}
             org.opencontainers.image.licenses=AGPL-3.0-only
 
-      - name: Build and push immich-server
+      # Without publish, the image is built for linux/amd64 and loaded into the
+      # runner's Docker daemon so that the SBOM and scans run on the same build.
+      - name: Build immich-server
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: server/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: mode=max
-          sbom: true
+          platforms: ${{ needs.source.outputs.publish == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ needs.source.outputs.publish == 'true' }}
+          load: ${{ needs.source.outputs.publish != 'true' }}
+          provenance: ${{ needs.source.outputs.publish == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ needs.source.outputs.publish == 'true' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             BUILD_ID=${{ github.run_id }}
             BUILD_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            BUILD_IMAGE=ghcr.io/${{ github.repository_owner }}/immich-server:${{ steps.version.outputs.version }}
+            BUILD_IMAGE=ghcr.io/${{ github.repository_owner }}/immich-server:${{ needs.source.outputs.version }}
             BUILD_IMAGE_URL=${{ github.server_url }}/${{ github.repository }}/pkgs/container/immich-server
             BUILD_REPOSITORY=${{ github.repository }}
             BUILD_REPOSITORY_URL=${{ github.server_url }}/${{ github.repository }}
-            BUILD_SOURCE_REF=${{ github.ref_name }}
-            BUILD_SOURCE_COMMIT=${{ github.sha }}
-            BUILD_SOURCE_URL=${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+            BUILD_SOURCE_REF=${{ needs.source.outputs.version }}
+            BUILD_SOURCE_COMMIT=${{ needs.source.outputs.commit }}
+            BUILD_SOURCE_URL=${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.source.outputs.commit }}
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+
+      - name: Resolve built image reference
+        id: image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/immich-server
+        run: |
+          if [ "$PUBLISH" = true ]; then
+            echo "ref=$IMAGE@$DIGEST" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=immich-server:$VERSION" >> "$GITHUB_OUTPUT"
+            echo "Dry run: the linux/amd64 image was built and scanned locally and not pushed." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Generate CycloneDX SBOM
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/immich-server@${{ steps.build.outputs.digest }}
+          image-ref: ${{ steps.image.outputs.ref }}
           format: cyclonedx
           output: immich-server-sbom.cdx.json
           version: v0.69.3
@@ -128,7 +246,7 @@ jobs:
       - name: Scan downstream image for vulnerabilities
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/immich-server@${{ steps.build.outputs.digest }}
+          image-ref: ${{ steps.image.outputs.ref }}
           format: json
           output: trivy-downstream.json
           exit-code: '0'
@@ -148,6 +266,7 @@ jobs:
           version: v0.69.3
 
       - name: Record image digest and new findings
+        id: findings
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           UPSTREAM_IMAGE: ${{ steps.upstream.outputs.image }}
@@ -160,6 +279,10 @@ jobs:
           findings trivy-upstream.json > trivy-upstream.txt
           comm -23 trivy-downstream.txt trivy-upstream.txt > trivy-new-findings.txt
           {
+            echo "downstream=$(wc -l < trivy-downstream.txt | tr -d ' ')"
+            echo "upstream=$(wc -l < trivy-upstream.txt | tr -d ' ')"
+          } >> "$GITHUB_OUTPUT"
+          {
             echo "Upstream baseline: $UPSTREAM_IMAGE"
             echo "Downstream fixable HIGH/CRITICAL findings: $(wc -l < trivy-downstream.txt)"
             echo "Upstream fixable HIGH/CRITICAL findings: $(wc -l < trivy-upstream.txt)"
@@ -169,7 +292,7 @@ jobs:
       - name: Upload release evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: immich-server-${{ steps.version.outputs.version }}
+          name: immich-server-${{ needs.source.outputs.version }}
           path: |
             immich-server.digest
             immich-upstream.image
@@ -187,17 +310,153 @@ jobs:
           fi
 
       - name: Install Cosign
+        if: needs.source.outputs.publish == 'true'
         uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
 
       - name: Sign image by keyless identity
+        if: needs.source.outputs.publish == 'true'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/immich-server
         run: cosign sign --yes "$IMAGE@$DIGEST"
 
+      # The certificate names this workflow file at the ref of the run: the tag for a
+      # tag push, or the branch the upstream sync ran on when it calls this workflow.
+      - name: Verify the signature identity
+        id: identity
+        if: needs.source.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/immich-server
+          IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/dkn-release.yml@${{ github.ref }}
+        run: |
+          set -euo pipefail
+          cosign verify "$IMAGE@$DIGEST" \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          echo "Signature identity: $IDENTITY" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Attest build provenance
+        if: needs.source.outputs.publish == 'true'
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/immich-server
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+  release:
+    name: Create GitHub release
+    needs: [source, publish]
+    # A tag push leaves the GitHub release to the manual flow in DOWNSTREAM.md.
+    if: ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: immich-server-${{ needs.source.outputs.version }}
+          path: evidence
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TAG: ${{ needs.source.outputs.version }}
+          COMMIT: ${{ needs.source.outputs.commit }}
+          PUBLISH: ${{ needs.source.outputs.publish }}
+          UPSTREAM_VERSION: ${{ needs.source.outputs.upstream_version }}
+          UPSTREAM_COMMIT: ${{ needs.source.outputs.upstream_commit }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          UPSTREAM_IMAGE: ${{ needs.publish.outputs.upstream_image }}
+          DOWNSTREAM_FINDINGS: ${{ needs.publish.outputs.downstream_findings }}
+          UPSTREAM_FINDINGS: ${{ needs.publish.outputs.upstream_findings }}
+          IDENTITY: ${{ needs.publish.outputs.identity }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/$OWNER/immich-server"
+          source_url="$SERVER_URL/$REPOSITORY/commit/$COMMIT"
+
+          previous=$(gh api --paginate "repos/$REPOSITORY/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | grep -E '^dkn-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' | grep -vxF "$TAG" | sort -V | tail -n 1 || true)
+          rollback="Redeploy the official same-version image \`$UPSTREAM_IMAGE\`."
+          if [ -n "$previous" ] && previous_digest=$(gh release download "$previous" --repo "$REPOSITORY" --pattern immich-server.digest --output - 2>/dev/null) \
+            && [[ "$previous_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            rollback="$rollback The previous verified downstream image is \`$image:$previous@$previous_digest\`; returning to it may be a version downgrade."
+          fi
+
+          {
+            echo "Unofficial downstream of [Immich $UPSTREAM_VERSION](https://github.com/immich-app/immich/releases/tag/$UPSTREAM_VERSION). Not supported by the Immich project. Published automatically by the upstream sync after a clean transplant, passing validation, and no findings added beyond the official image."
+            echo
+            echo "## Change"
+            echo
+            echo "The web application adds an opt-in **Select whole stack** toggle to bulk selection. It is off by default, so upstream primary-only selection is unchanged. When enabled, selected stack primaries expand to all stack members before bulk actions run."
+            echo
+            echo "Only \`immich-server\` is rebuilt, because it bundles the web application. Use upstream images for machine learning, and the upstream mobile apps."
+            echo
+            if [ -n "$NOTES" ]; then
+              echo "$NOTES"
+              echo
+            fi
+            echo "## Source"
+            echo
+            echo "- Upstream base: \`$UPSTREAM_VERSION\` (\`$UPSTREAM_COMMIT\`)"
+            echo "- Downstream commits: \`$UPSTREAM_COMMIT..$COMMIT\`"
+            echo "- Corresponding source: $source_url (tag \`$TAG\`)"
+            echo
+            echo "Set \`IMMICH_THIRD_PARTY_SOURCE_URL\` to that commit URL, which matches the source link baked into the image. See [DOWNSTREAM.md]($SERVER_URL/$REPOSITORY/blob/$TAG/DOWNSTREAM.md)."
+            echo
+            echo "## Image"
+            echo
+            echo '```'
+            echo "$image:$TAG@$DIGEST"
+            echo '```'
+            echo
+            echo "Deploy by digest. Verify the signature and provenance:"
+            echo
+            echo '```bash'
+            echo "cosign verify $image@$DIGEST \\"
+            echo "  --certificate-identity $IDENTITY \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+            echo
+            echo '```bash'
+            echo "gh attestation verify oci://$image@$DIGEST -R $REPOSITORY"
+            echo '```'
+            echo
+            echo "Vulnerability gate: Trivy v0.69.3 found $DOWNSTREAM_FINDINGS fixable HIGH/CRITICAL findings in this image and $UPSTREAM_FINDINGS in the official \`$UPSTREAM_IMAGE\`, with 0 added by the downstream. The release run resolved that baseline digest from the tag. The CycloneDX SBOM, digest, baseline image and both scan reports are attached here and to release run $RUN_URL."
+            echo
+            echo "## Rollback"
+            echo
+            echo "$rollback Follow upstream's release and database-backup guidance."
+          } > release-notes.md
+
+          if [ "$PUBLISH" != true ]; then
+            {
+              echo "## Dry run: GitHub release not created"
+              echo
+              echo "Previous release: ${previous:-none}"
+              echo
+              cat release-notes.md
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if gh release view "$TAG" --repo "$REPOSITORY" > /dev/null 2>&1; then
+            echo "::error title=Release exists::A GitHub release for $TAG already exists; it was not changed."
+            exit 1
+          fi
+          url=$(gh release create "$TAG" --repo "$REPOSITORY" --verify-tag --title "$TAG" --notes-file release-notes.md \
+            evidence/immich-server.digest \
+            evidence/immich-upstream.image \
+            evidence/immich-server-sbom.cdx.json \
+            evidence/trivy-downstream.json \
+            evidence/trivy-upstream.json)
+          printf '## GitHub release\n\n%s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
