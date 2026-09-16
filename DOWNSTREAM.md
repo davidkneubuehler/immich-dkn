@@ -11,8 +11,8 @@ The web application adds an opt-in whole-stack selection toggle. It is off by de
 `.github/workflows/dkn-upstream-sync.yml` runs daily and on manual dispatch. Nobody needs to check upstream by hand.
 
 1. It finds the highest published, non-prerelease release of `immich-app/immich` and derives the current base from the default branch name.
-2. If that release is not newer than the base, if `sync/vX.Y.Z` or `downstream/vX.Y.Z` already exists, or if the official `immich-server` image for the release is not published yet, it stops without changing anything.
-3. Otherwise it cherry-picks the downstream commits (base tag..default branch) onto the upstream tag. If the pinned `UPSTREAM_IMAGE` in `dkn-release.yml` differs, it adds one commit that pins the official image of the new release.
+2. If that release is not newer than the base, if `sync/vX.Y.Z` or `downstream/vX.Y.Z` already exists, or if the official `immich-server` image for the release is not published yet, it stops without changing anything. An `upstream-base/vX.Y.Z` branch without a matching `sync/vX.Y.Z` is left over from a failed attempt; the run reuses it, or resets it to the upstream tag if it points elsewhere.
+3. Otherwise it cherry-picks the downstream commits (base tag..default branch) onto the upstream tag. It adds no commits of its own: `GITHUB_TOKEN` cannot push new workflow file content, and the release workflow resolves its scanner baseline from the release tag.
 4. On a conflict it aborts, creates no branches, and fails the run. The run summary lists the conflicting commit, the conflicting files, and the commits applied and not applied.
 5. On success it creates `upstream-base/vX.Y.Z` at the upstream tag and `sync/vX.Y.Z` with the transplanted commits. It then runs `dkn-stack-selection.yml` against the candidate, builds the production `immich-server` image for linux/amd64 without pushing it, and compares its fixable HIGH and CRITICAL findings with the official image of the same upstream version.
 6. It opens a pull request from `sync/vX.Y.Z` into `upstream-base/vX.Y.Z`, so the diff is exactly the downstream patch, and requests a review from the repository owner. The body links the upstream release notes, lists security advisories published since the previous base or referenced in the release notes, and includes the validation results and the scanner comparison. If validation or the comparison fails, the pull request is still opened and the run fails.
@@ -61,7 +61,7 @@ Upstream releases also create branches, and every downstream release pushes a br
 
 5. **Push only that branch and run remote CI.** `agent-git push git@github.com:<owner>/<repository>.git refs/heads/downstream/vX.Y.Z:refs/heads/downstream/vX.Y.Z`. Wait until `Downstream stack selection` succeeds with `headSha` equal to the pushed commit.
 6. **Sign and push the tag.** `agent-git tag -s dkn-vX.Y.Z-1` on that commit, with the upstream base and downstream commit range in the annotation, then push only `refs/tags/dkn-vX.Y.Z-1`.
-7. **Verify the release run.** Check that every job succeeded, record the image digest, check the CycloneDX SBOM artifact, confirm "Findings not present upstream: 0", and verify the keyless signature and provenance:
+7. **Verify the release run.** Check that every job succeeded, record the image digest, check that the upstream baseline image and digest in the job summary and the `immich-upstream.image` evidence belong to upstream `vX.Y.Z`, check the CycloneDX SBOM artifact, confirm "Findings not present upstream: 0", and verify the keyless signature and provenance:
 
    ```bash
    cosign verify ghcr.io/<owner>/immich-server@<digest> \
@@ -84,7 +84,7 @@ Before making a downstream image available, publish the corresponding complete s
 
 A release may not add HIGH or CRITICAL findings beyond the official `immich-server` image of the same upstream version. Inherited findings are listed in the review pull request and the release evidence but do not block a release.
 
-Dependency and base-image vulnerabilities are inherited from upstream and are not patched here, so the downstream stays a minimal web patch that transplants cleanly onto new upstream releases. `dkn-release.yml` enforces the rule against the official image pinned in `UPSTREAM_IMAGE`, and the upstream sync pins the new official image when it prepares a candidate.
+Dependency and base-image vulnerabilities are inherited from upstream and are not patched here, so the downstream stays a minimal web patch that transplants cleanly onto new upstream releases. `dkn-release.yml` enforces the rule: it derives the upstream version from the release tag (`dkn-vX.Y.Z-N` becomes `vX.Y.Z`), resolves the digest of `ghcr.io/immich-app/immich-server:vX.Y.Z` during the run, fails if the digest cannot be resolved, scans against that digest, and records the resolved image and digest in the job summary and the release evidence. The upstream sync applies the same comparison to each candidate before review.
 
 ## Release checklist
 
