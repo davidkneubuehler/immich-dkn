@@ -32,6 +32,7 @@ permissions: {}
 env:
   UPSTREAM_REPOSITORY: immich-app/immich
   UPSTREAM_IMAGE_NAME: ghcr.io/immich-app/immich-server
+  TRIVY_VERSION: v0.69.3
 
 jobs:
   detect:
@@ -39,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: read
     outputs:
       proceed: ${{ steps.detect.outputs.proceed }}
       publish: ${{ steps.detect.outputs.publish }}
@@ -56,6 +58,14 @@ jobs:
       upstream_image: ${{ steps.detect.outputs.upstream_image }}
       advisories: ${{ steps.advisories.outputs.advisories }}
     steps:
+      # Authenticated GHCR requests avoid the anonymous rate limit of shared runners.
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+
       - name: Compare the downstream base with upstream releases
         id: detect
         env:
@@ -156,7 +166,7 @@ jobs:
           base_sha=$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$base_tag" --jq .sha)
 
           # Without a sync branch, an existing upstream-base branch is left over from a
-          # failed attempt. The review pull request reuses it or resets it to the upstream tag.
+          # failed attempt. The review pull request reuses it or recreates it at the upstream tag.
           stale_base_sha=$(gh api "repos/$REPOSITORY/git/matching-refs/heads/$base_branch" --jq ".[] | select(.ref == \"refs/heads/$base_branch\") | .object.sha")
 
           {
@@ -194,7 +204,7 @@ jobs:
             if [ "$stale_base_sha" = "$target_sha" ]; then
               echo "- \`$base_branch\` is left over from an earlier attempt and already points at \`$target_tag\`; a review pull request reuses it."
             elif [ -n "$stale_base_sha" ]; then
-              echo "- \`$base_branch\` is left over from an earlier attempt at \`$stale_base_sha\`; a review pull request resets it to \`$target_tag\`."
+              echo "- \`$base_branch\` is left over from an earlier attempt at \`$stale_base_sha\`; a review pull request recreates it at \`$target_tag\`."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -368,6 +378,7 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+      packages: read
     outputs:
       comparison: ${{ steps.compare.outputs.comparison }}
       added: ${{ steps.compare.outputs.added }}
@@ -380,6 +391,15 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Authenticated GHCR requests avoid the anonymous rate limit of shared runners
+      # for the build's base images, the official image pull, and the scans.
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
 
       # Rate limits of registries and the GitHub API during the build are transient,
       # so a failed build is retried once.
@@ -442,7 +462,7 @@ jobs:
           exit-code: '0'
           ignore-unfixed: true
           severity: HIGH,CRITICAL
-          version: v0.69.3
+          version: ${{ env.TRIVY_VERSION }}
 
       - name: Scan official upstream image
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
@@ -453,7 +473,7 @@ jobs:
           exit-code: '0'
           ignore-unfixed: true
           severity: HIGH,CRITICAL
-          version: v0.69.3
+          version: ${{ env.TRIVY_VERSION }}
 
       - name: Compare findings
         id: compare
@@ -473,7 +493,7 @@ jobs:
           }
           added=$(wc -l < trivy-added.txt | tr -d ' ')
           {
-            echo "| Image (linux/amd64, Trivy v0.69.3, fixable HIGH/CRITICAL) | Findings |"
+            echo "| Image (linux/amd64, Trivy $TRIVY_VERSION, fixable HIGH/CRITICAL) | Findings |"
             echo "| --- | ---: |"
             echo "| Candidate built from this branch | $(wc -l < trivy-candidate.txt | tr -d ' ') |"
             echo "| Official \`$UPSTREAM_IMAGE\` | $(wc -l < trivy-upstream.txt | tr -d ' ') |"
@@ -643,8 +663,11 @@ jobs:
           if [ -z "$existing" ]; then
             gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/heads/$BASE_BRANCH" -f sha="$TARGET_SHA" > /dev/null
           elif [ "$existing" != "$TARGET_SHA" ]; then
-            gh api -X PATCH "repos/$REPOSITORY/git/refs/heads/$BASE_BRANCH" -f sha="$TARGET_SHA" -F force=true > /dev/null
-            printf '\nReset `%s` from `%s` to upstream `%s`.\n' "$BASE_BRANCH" "$existing" "$TARGET_TAG" >> "$GITHUB_STEP_SUMMARY"
+            # The upstream-sync-candidates ruleset blocks updates and non-fast-forward
+            # pushes to upstream-base/*, but not deletion or creation.
+            gh api -X DELETE "repos/$REPOSITORY/git/refs/heads/$BASE_BRANCH"
+            gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/heads/$BASE_BRANCH" -f sha="$TARGET_SHA" > /dev/null
+            printf '\nRecreated `%s` at upstream `%s`; it pointed at `%s`.\n' "$BASE_BRANCH" "$TARGET_TAG" "$existing" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Open pull request for review
