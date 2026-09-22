@@ -134,3 +134,19 @@ Dependency and base-image vulnerabilities are inherited from upstream and are no
 - Verify the release run digest, CycloneDX SBOM, vulnerability comparison, keyless signature, and provenance.
 - Verify the baked `BUILD_SOURCE_URL` and runtime `IMMICH_THIRD_PARTY_SOURCE_URL` point to the matching public source before serving users.
 - Publish only the `immich-server` image under the downstream tag convention and retain the previous verified digest.
+
+## Open items
+
+### The automatic release path has never published a release
+
+Every part of it has run, but never together for a real release. Rehearsals run `dkn-release.yml` with `publish: false`, so they create no tag, push no image, and sign, attest and release nothing. Every published release so far came from the manual flow. Tag creation through the API, the image push, the keyless signature, the provenance attestation and GitHub release creation therefore run for the first time on the first automatic release.
+
+Treat that release as unverified until it is checked. Work through the release checklist above, read the summary of the sync run that produced it, and confirm that the branch, the tag and the release all name the same commit. Deploy only after that. If a publishing step fails, the run fails and later scheduled runs skip that version; recover it as described under "Recovering a failed clean-path run".
+
+One failure mode has no rehearsal coverage: GitHub rejects ref updates from `GITHUB_TOKEN` that introduce workflow file content the repository has not seen. This can hit the `follow` job when an upstream release changes upstream's own workflow files. The job then fails with that message, and `dkn` stays on the previous release until the merge is made by hand.
+
+### Whole-stack actions in the asset viewer
+
+Planned, not started. In the asset viewer the actions still apply to the single asset on screen, so deleting a RAW and JPEG pair means leaving the viewer and selecting the stack in the timeline. The plan is to let viewer actions apply to the whole stack while the whole-stack toggle is on, matching what the toggle already does for selections in the timeline.
+
+This widens the scope rule in AGENTS.md, which today limits the downstream patch to selection behavior and keeps single-asset viewer actions as upstream has them. Agree that scope change first, then implement it. It belongs in its own release, separate from any upstream transplant, so that the release notes and the review cover exactly one behavior change.
