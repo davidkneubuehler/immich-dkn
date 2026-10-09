@@ -86,6 +86,24 @@ describe('DeleteAction component', () => {
       expect(preAction).toHaveBeenCalledWith(expect.objectContaining({ type: 'trash', assetIds }));
     });
 
+    it('uses the loaded stack when an asset update dropped the stack summary', async () => {
+      const members = timelineAssetFactory.buildList(3);
+      const resolve = vi.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(members);
+      const updatedAsset = { ...asset, stack: undefined };
+      const { getByLabelText } = renderWithTooltips(DeleteAction, {
+        asset: updatedAsset,
+        stackSummary: stackRef,
+        onAction: vi.fn(),
+        preAction: vi.fn(),
+      });
+
+      await fireEvent.click(getByLabelText('whole_stack_action'));
+
+      await vi.waitFor(() => expect(deleteAssets).toHaveBeenCalled());
+      expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ id: asset.id, stack: stackRef }));
+      expect(vi.mocked(deleteAssets).mock.calls[0][2]).toEqual(members);
+    });
+
     it('deletes nothing when the stack lookup fails', async () => {
       vi.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(undefined);
       const preAction = vi.fn();

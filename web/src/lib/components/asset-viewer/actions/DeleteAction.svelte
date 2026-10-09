@@ -8,7 +8,7 @@
   import { deleteAssets as deleteAssetsUtil, type OnUndoDelete } from '$lib/utils/actions';
   import { handleError } from '$lib/utils/handle-error';
   import { toTimelineAsset } from '$lib/utils/timeline-util';
-  import { deleteAssets, type AssetResponseDto } from '@immich/sdk';
+  import { deleteAssets, type AssetResponseDto, type AssetStackResponseDto } from '@immich/sdk';
   import { IconButton, modalManager, toastManager } from '@immich/ui';
   import { mdiDeleteForeverOutline, mdiDeleteOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';
@@ -19,21 +19,25 @@
     onAction: OnAction;
     preAction: PreAction;
     onUndoDelete?: OnUndoDelete;
+    /** The stack of the asset on screen, when the asset itself carries no stack summary. */
+    stackSummary?: AssetStackResponseDto;
   }
 
-  let { asset, onAction, preAction, onUndoDelete = undefined }: Props = $props();
+  let { asset, onAction, preAction, onUndoDelete = undefined, stackSummary }: Props = $props();
 
   const forceDefault = $derived(asset.isTrashed || !featureFlagsManager.value.trash);
-  const stackCount = $derived(
-    assetMultiSelectManager.selectWholeStack && asset.stack ? asset.stack.assetCount : undefined,
-  );
+  const stackRef = $derived(asset.stack ?? stackSummary);
+  const stackCount = $derived(assetMultiSelectManager.selectWholeStack && stackRef ? stackRef.assetCount : undefined);
   const label = $derived.by(() => {
     const action = forceDefault ? $t('permanently_delete') : $t('delete');
     return stackCount ? $t('whole_stack_action', { values: { action, count: stackCount } }) : action;
   });
 
   const trashOrDeleteStack = async (forceRequest?: boolean) => {
-    const assets = await assetMultiSelectManager.getStackAssetsForAction(toTimelineAsset(asset));
+    const assets = await assetMultiSelectManager.getStackAssetsForAction({
+      ...toTimelineAsset(asset),
+      stack: stackRef ?? null,
+    });
     if (!assets) {
       toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
       return;

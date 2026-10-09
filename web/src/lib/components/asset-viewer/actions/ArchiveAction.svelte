@@ -8,7 +8,7 @@
   import { eventManager } from '$lib/managers/event-manager.svelte';
   import { archiveAssets, toggleArchive } from '$lib/utils/asset-utils';
   import { toTimelineAsset } from '$lib/utils/timeline-util';
-  import { AssetVisibility, getAssetInfo, type AssetResponseDto } from '@immich/sdk';
+  import { AssetVisibility, getAssetInfo, type AssetResponseDto, type AssetStackResponseDto } from '@immich/sdk';
   import { toastManager } from '@immich/ui';
   import { mdiArchiveArrowDownOutline, mdiArchiveArrowUpOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';
@@ -17,20 +17,24 @@
     asset: AssetResponseDto;
     onAction: OnAction;
     preAction: PreAction;
+    /** The stack of the asset on screen, when the asset itself carries no stack summary. */
+    stackSummary?: AssetStackResponseDto;
   }
 
-  let { asset, onAction, preAction }: Props = $props();
+  let { asset, onAction, preAction, stackSummary }: Props = $props();
 
-  const stackCount = $derived(
-    assetMultiSelectManager.selectWholeStack && asset.stack ? asset.stack.assetCount : undefined,
-  );
+  const stackRef = $derived(asset.stack ?? stackSummary);
+  const stackCount = $derived(assetMultiSelectManager.selectWholeStack && stackRef ? stackRef.assetCount : undefined);
   const text = $derived.by(() => {
     const action = asset.isArchived ? $t('unarchive') : $t('to_archive');
     return stackCount ? $t('whole_stack_action', { values: { action, count: stackCount } }) : action;
   });
 
   const onArchiveStack = async () => {
-    const assets = await assetMultiSelectManager.getStackAssetsForAction(toTimelineAsset(asset));
+    const assets = await assetMultiSelectManager.getStackAssetsForAction({
+      ...toTimelineAsset(asset),
+      stack: stackRef ?? null,
+    });
     if (!assets) {
       toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
       return;
