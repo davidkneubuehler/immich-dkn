@@ -75,7 +75,7 @@ jobs:
         run: pnpm --filter @immich/sdk --filter @immich/plugin-sdk build
 
       - name: Run focused unit tests
-        run: pnpm --dir web exec vitest run src/lib/managers/asset-multi-select-manager.svelte.spec.ts src/lib/services/asset.service.spec.ts
+        run: pnpm --dir web exec vitest run src/lib/managers/asset-multi-select-manager.svelte.spec.ts src/lib/services/asset.service.spec.ts src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
 
       - name: Run web static checks
         run: pnpm --dir web run check:code
