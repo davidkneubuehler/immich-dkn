@@ -30,6 +30,8 @@
         { key: ['Y', 'y'], action: $t('previous_or_next_year') },
         { key: ['g'], action: $t('navigate_to_time') },
         { key: ['x'], action: $t('select') },
+        { key: ['Ctrl', 'd'], action: $t('deselect_all') },
+        { key: ['⇧', 's'], action: $t('select_whole_stack') },
         { key: ['Esc'], action: $t('back_close_deselect') },
         { key: ['Ctrl', 'k'], action: $t('search_your_photos') },
         { key: ['Ctrl', '⇧', 'k'], action: $t('open_the_search_filters') },
@@ -46,6 +48,7 @@
         { key: ['⇧', 'd'], action: $t('download') },
         { key: ['Space'], action: $t('play_or_pause_video') },
         { key: ['Del'], action: $t('trash_delete_asset'), info: $t('shift_to_permanent_delete') },
+        { key: ['Ctrl', 'Del'], action: $t('trash_or_delete_selected_assets'), info: $t('shift_to_permanent_delete') },
         ...(authManager.authenticated && authManager.preferences.ratings.enabled
           ? [{ key: ['0-5'], action: $t('rate_asset'), info: $t('rate_asset_description') }]
           : []),

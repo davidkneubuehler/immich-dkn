@@ -1,6 +1,7 @@
 <script lang="ts">
   import { shortcuts } from '$lib/actions/shortcut';
   import { AssetAction } from '$lib/constants';
+  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
   import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
   import AssetDeleteConfirmModal from '$lib/modals/AssetDeleteConfirmModal.svelte';
   import { showDeleteModal } from '$lib/stores/preferences.store';
@@ -23,8 +24,41 @@
   let { asset, onAction, preAction, onUndoDelete = undefined }: Props = $props();
 
   const forceDefault = $derived(asset.isTrashed || !featureFlagsManager.value.trash);
+  const stackCount = $derived(
+    assetMultiSelectManager.selectWholeStack && asset.stack ? asset.stack.assetCount : undefined,
+  );
+  const label = $derived.by(() => {
+    const action = forceDefault ? $t('permanently_delete') : $t('delete');
+    return stackCount ? $t('whole_stack_action', { values: { action, count: stackCount } }) : action;
+  });
+
+  const trashOrDeleteStack = async (forceRequest?: boolean) => {
+    const assets = await assetMultiSelectManager.getStackAssetsForAction(toTimelineAsset(asset));
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+
+    const force = forceDefault || forceRequest || assets.some((member) => member.isTrashed);
+    if (force && $showDeleteModal) {
+      const confirmed = await modalManager.show(AssetDeleteConfirmModal, { size: assets.length });
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    const timelineAsset = toTimelineAsset(asset);
+    const assetIds = assets.map(({ id }) => id);
+    const type = force ? AssetAction.DELETE : AssetAction.TRASH;
+    preAction({ type, asset: timelineAsset, assetIds });
+    await deleteAssetsUtil(force, () => onAction({ type, asset: timelineAsset, assetIds }), assets, onUndoDelete);
+  };
 
   const trashOrDelete = async (forceRequest?: boolean) => {
+    if (stackCount) {
+      return trashOrDeleteStack(forceRequest);
+    }
+
     const timelineAsset = toTimelineAsset(asset);
     const force = forceDefault || forceRequest;
 
@@ -70,6 +104,6 @@
   shape="round"
   variant="ghost"
   icon={forceDefault ? mdiDeleteForeverOutline : mdiDeleteOutline}
-  aria-label={forceDefault ? $t('permanently_delete') : $t('delete')}
+  aria-label={label}
   onclick={() => trashOrDelete()}
 />

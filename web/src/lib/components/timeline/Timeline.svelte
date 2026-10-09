@@ -11,7 +11,10 @@
   import HotModuleReload from '$lib/elements/HotModuleReload.svelte';
   import Portal from '$lib/elements/Portal.svelte';
   import Skeleton from '$lib/elements/Skeleton.svelte';
-  import type { AssetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
+  import {
+    assetMultiSelectManager,
+    type AssetMultiSelectManager,
+  } from '$lib/managers/asset-multi-select-manager.svelte';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
   import type { TimelineDay } from '$lib/managers/timeline-manager/timeline-day.svelte';
   import { isIntersecting } from '$lib/managers/timeline-manager/internal/intersection-support.svelte';
@@ -705,7 +708,16 @@
 
 <Portal target="body">
   {#if assetViewerManager.isViewing}
-    <TimelineAssetViewer bind:invisible {timelineManager} {removeAction} {withStacked} {isShared} {album} {person} />
+    <TimelineAssetViewer
+      bind:invisible
+      {timelineManager}
+      {removeAction}
+      {withStacked}
+      {isShared}
+      {album}
+      {person}
+      selectable={assetInteraction === assetMultiSelectManager && !isSelectionMode && !singleSelect}
+    />
   {/if}
 </Portal>
 
