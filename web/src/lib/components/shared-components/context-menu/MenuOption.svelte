@@ -11,7 +11,7 @@
     icon?: IconLike;
     activeColor?: string;
     textColor?: string;
-    onClick: () => void;
+    onClick: (event: KeyboardEvent | MouseEvent) => void;
     shortcut?: Shortcut | null;
     shortcutLabel?: string;
     disabled?: boolean;
@@ -33,20 +33,20 @@
 
   let isActive = $derived($selectedIdStore === id);
 
-  const handleClick = () => {
+  const handleClick = (event: MouseEvent) => {
     if (disabled) {
       return;
     }
     // eslint-disable-next-line unicorn/no-optional-chaining-on-undeclared-variable
     $optionClickCallbackStore?.();
-    onClick();
+    onClick(event);
   };
 
   if (shortcut && !shortcutLabel) {
     shortcutLabel = computeShortcutLabel(shortcut);
   }
   const bindShortcutIfSet = shortcut
-    ? (n: HTMLElement) => bindShortcut(n, { shortcut, onShortcut: () => !disabled && onClick() })
+    ? (n: HTMLElement) => bindShortcut(n, { shortcut, onShortcut: (event) => !disabled && onClick(event) })
     : () => {};
 </script>
 

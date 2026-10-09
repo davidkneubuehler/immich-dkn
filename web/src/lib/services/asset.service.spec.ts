@@ -58,6 +58,7 @@ describe('AssetService', () => {
   describe('getAssetBulkActions', () => {
     beforeEach(() => {
       vitest.clearAllMocks();
+      authManager.setUser(userAdminFactory.build());
     });
 
     afterEach(() => {
