@@ -1,7 +1,7 @@
-import { AssetVisibility, type LoginResponseDto } from '@immich/sdk';
+import { AssetVisibility, updateStack, type LoginResponseDto } from '@immich/sdk';
 import { expect, test, type BrowserContext, type Page, type Request } from '@playwright/test';
 import { readFileSync } from 'node:fs';
-import { testAssetDir, utils } from 'src/utils.js';
+import { asBearerAuth, testAssetDir, utils } from 'src/utils.js';
 
 type Fixture = {
   stackOne: string[];
@@ -84,8 +84,13 @@ const setup = async ({
 
 const selectExpandedStack = async (page: Page, fixture: Fixture) => {
   await selectAsset(page, fixture.stackOne[0]);
-  await expect(page.getByText('1 selected')).toBeVisible();
-  await page.getByText('Select whole stack').locator('..').getByRole('switch').click();
+  // The toggle stays on after an action clears the selection, so only switch it on when it is off.
+  const switchControl = page.getByText('Select whole stack').locator('..').getByRole('switch');
+  if (!(await switchControl.isChecked())) {
+    await expect(page.getByText('1 selected')).toBeVisible();
+    await switchControl.click();
+  }
+  await expect(switchControl).toBeChecked();
   await expect(page.getByText('2 selected')).toBeVisible();
 };
 
@@ -309,5 +314,266 @@ test.describe('Stack selection', () => {
     expect(deleteRequests).toBe(0);
     await expect.poll(() => getTrashStates(admin.accessToken, fixture.stackOne)).toEqual([false, false]);
     await expect(page.getByText('1 selected')).toBeVisible();
+  });
+});
+
+type ViewerFixture = {
+  /** RAW primary followed by its JPEG and a third member. */
+  rawStack: string[];
+  jpegStack: string[];
+  ordinary: string;
+};
+
+const createViewerFixture = async (admin: LoginResponseDto): Promise<ViewerFixture> => {
+  const [raw, rawJpeg, rawExtra, jpeg, jpegRaw, ordinary] = await Promise.all([
+    utils.createAsset(admin.accessToken, {
+      fileCreatedAt: '2024-01-01T10:00:00.000Z',
+      assetData: { bytes: rawTwo, filename: 'viewer-raw.nef' },
+    }),
+    utils.createAsset(admin.accessToken, {
+      fileCreatedAt: '2024-01-01T10:00:01.000Z',
+      assetData: { bytes: jpgTwo, filename: 'viewer-raw.jpg' },
+    }),
+    utils.createAsset(admin.accessToken, { fileCreatedAt: '2024-01-01T10:00:02.000Z' }),
+    utils.createAsset(admin.accessToken, {
+      fileCreatedAt: '2024-01-02T10:00:00.000Z',
+      assetData: { bytes: jpgOne, filename: 'viewer-jpeg.jpg' },
+    }),
+    utils.createAsset(admin.accessToken, {
+      fileCreatedAt: '2024-01-02T10:00:01.000Z',
+      assetData: { bytes: rawOne, filename: 'viewer-jpeg.nef' },
+    }),
+    utils.createAsset(admin.accessToken, {
+      fileCreatedAt: '2024-01-03T10:00:00.000Z',
+      assetData: { bytes: ordinaryJpg, filename: 'viewer-ordinary.jpg' },
+    }),
+  ]);
+
+  await utils.waitForQueueFinish(admin.accessToken, 'metadataExtraction');
+  const [rawStack, jpegStack] = await Promise.all([
+    utils.createStack(admin.accessToken, [raw.id, rawJpeg.id, rawExtra.id]),
+    utils.createStack(admin.accessToken, [jpeg.id, jpegRaw.id]),
+  ]);
+  await Promise.all([
+    updateStack(
+      { id: rawStack.id, stackUpdateDto: { primaryAssetId: raw.id } },
+      { headers: asBearerAuth(admin.accessToken) },
+    ),
+    updateStack(
+      { id: jpegStack.id, stackUpdateDto: { primaryAssetId: jpeg.id } },
+      { headers: asBearerAuth(admin.accessToken) },
+    ),
+  ]);
+
+  return {
+    rawStack: [raw.id, rawJpeg.id, rawExtra.id],
+    jpegStack: [jpeg.id, jpegRaw.id],
+    ordinary: ordinary.id,
+  };
+};
+
+const setupViewer = async ({ context, page }: { context: BrowserContext; page: Page }) => {
+  utils.initSdk();
+  await utils.resetDatabase();
+  const admin = await utils.adminSetup();
+  const fixture = await createViewerFixture(admin);
+  await utils.setAuthCookies(context, admin.accessToken);
+  await page.goto('/photos');
+  await page.waitForLoadState('networkidle');
+  await page.locator(`[data-asset="${fixture.rawStack[0]}"]`).waitFor();
+  return { admin, fixture };
+};
+
+const viewerSelection = (page: Page) => page.getByTestId('asset-viewer-selection');
+
+const expectViewing = async (page: Page, id: string) => {
+  await expect(page).toHaveURL(new RegExp(`/photos/${id}`));
+  await expect(page.locator('#immich-asset-viewer')).toBeVisible();
+};
+
+const openViewer = async (page: Page, id: string) => {
+  const asset = page.locator(`[data-asset="${id}"]`).first();
+  await asset.scrollIntoViewIfNeeded();
+  await asset.click();
+  await expectViewing(page, id);
+};
+
+const previewFromSelection = async (page: Page, id: string) => {
+  const asset = page.locator(`[data-asset="${id}"]`).first();
+  await asset.scrollIntoViewIfNeeded();
+  await asset.hover();
+  await asset.getByRole('button', { name: 'Preview asset' }).click();
+  await expectViewing(page, id);
+};
+
+const viewNextAsset = async (page: Page, currentId: string) => {
+  await page.keyboard.press('ArrowRight');
+  await expect(page).not.toHaveURL(new RegExp(`/photos/${currentId}`));
+  await expect(page.locator('#immich-asset-viewer')).toBeVisible();
+  const nextId = new URL(page.url()).pathname.split('/').pop()!;
+  expect(nextId).toMatch(/^[0-9a-f-]{36}$/);
+  return nextId;
+};
+
+const markButton = (page: Page) => viewerSelection(page).getByRole('button', { name: /^(Select|Deselect) asset$/ });
+
+const enableWholeStackInViewer = async (page: Page) => {
+  await page.keyboard.press('Shift+S');
+  await expect(viewerSelection(page).getByRole('switch')).toBeChecked();
+};
+
+const isDeleteRequest = (request: Request) => request.url().endsWith('/api/assets') && request.method() === 'DELETE';
+const isRestoreRequest = (request: Request) => request.url().endsWith('/api/trash/restore/assets');
+
+test.describe('Asset viewer selection', () => {
+  test.beforeAll(() => utils.initSdk());
+
+  test('marks and unmarks assets and shares the selection with the timeline', async ({ context, page }) => {
+    const { fixture } = await setupViewer({ context, page });
+
+    await openViewer(page, fixture.ordinary);
+    await expect(markButton(page)).toHaveAttribute('aria-pressed', 'false');
+    await page.keyboard.press('x');
+    await expect(viewerSelection(page).getByText('1 selected', { exact: true })).toBeVisible();
+    await expect(viewerSelection(page).getByRole('button', { name: 'Deselect asset' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    const nextId = await viewNextAsset(page, fixture.ordinary);
+    await expect(markButton(page)).toHaveAttribute('aria-pressed', 'false');
+    await page.keyboard.press('x');
+    await expect(viewerSelection(page).getByText('2 selected', { exact: true })).toBeVisible();
+
+    await viewerSelection(page).getByRole('button', { name: 'Deselect asset' }).click();
+    await expect(viewerSelection(page).getByText('1 selected', { exact: true })).toBeVisible();
+    await viewerSelection(page).getByRole('button', { name: 'Select asset' }).click();
+    await expect(viewerSelection(page).getByText('2 selected', { exact: true })).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#immich-asset-viewer')).toHaveCount(0);
+    await expect(page.getByText('2 selected')).toBeVisible();
+
+    const timelineSelected = [fixture.jpegStack[0], fixture.rawStack[0]].find((id) => id !== nextId)!;
+    await selectAsset(page, timelineSelected);
+    await expect(page.getByText('3 selected')).toBeVisible();
+    await previewFromSelection(page, timelineSelected);
+    await expect(viewerSelection(page).getByText('3 selected', { exact: true })).toBeVisible();
+    await expect(viewerSelection(page).getByRole('button', { name: 'Deselect asset' })).toBeVisible();
+
+    await page.keyboard.press('Control+d');
+    await expect(viewerSelection(page).getByText(/selected$/)).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(page.getByText(/\d+ selected/)).toHaveCount(0);
+  });
+
+  test('expands marks and actions to a RAW-primary stack only while the toggle is on', async ({ context, page }) => {
+    const { admin, fixture } = await setupViewer({ context, page });
+    const album = await utils.createAlbum(admin.accessToken, { albumName: 'Viewer stack album' });
+    const addToAlbum = async (title: string, expected: string[]) => {
+      const request = page.waitForRequest((request) => request.url().endsWith(`/api/albums/${album.id}/assets`));
+      await page.getByRole('button', { name: 'More' }).click();
+      await page.getByRole('menuitem', { name: title }).click();
+      await page.getByRole('dialog').getByRole('button', { name: album.albumName }).first().click();
+      expect(await getRequestBody(request)).toEqual({ ids: expected });
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    };
+
+    await openViewer(page, fixture.rawStack[0]);
+    await expect(viewerSelection(page).getByRole('switch')).not.toBeChecked();
+    await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeVisible();
+    await addToAlbum('Add to album', [fixture.rawStack[0]]);
+
+    await enableWholeStackInViewer(page);
+    await expect(page.getByRole('button', { name: 'Delete (3 assets)' })).toBeVisible();
+    await addToAlbum('Add to album (3 assets)', fixture.rawStack);
+
+    await page.keyboard.press('x');
+    await expect(viewerSelection(page).getByText('3 selected', { exact: true })).toBeVisible();
+    await expect(viewerSelection(page).getByText('2 hidden stack members included', { exact: true })).toBeVisible();
+    await expect(viewerSelection(page).getByRole('button', { name: 'Trash 3' })).toBeVisible();
+
+    await page.keyboard.press('Control+d');
+    await expect(viewerSelection(page).getByText(/selected$/)).toHaveCount(0);
+    await expect(viewerSelection(page).getByRole('switch')).toBeChecked();
+
+    await page.keyboard.press('Shift+S');
+    await expect(viewerSelection(page).getByRole('switch')).not.toBeChecked();
+    await page.keyboard.press('x');
+    await expect(viewerSelection(page).getByText('1 selected', { exact: true })).toBeVisible();
+  });
+
+  test('trashes a whole stack from the viewer and restores every ID', async ({ context, page }) => {
+    const { admin, fixture } = await setupViewer({ context, page });
+    await openViewer(page, fixture.rawStack[0]);
+    await enableWholeStackInViewer(page);
+
+    const trashRequest = page.waitForRequest(isDeleteRequest);
+    await page.getByRole('button', { name: 'Delete (3 assets)' }).click();
+    expect(await getRequestBody(trashRequest)).toEqual({ ids: fixture.rawStack, force: false });
+    await expect.poll(() => getTrashStates(admin.accessToken, fixture.rawStack)).toEqual([true, true, true]);
+    await expect(page.getByText('Trashed 3 assets')).toBeVisible();
+
+    const restoreRequest = page.waitForRequest(isRestoreRequest);
+    await page.getByRole('button', { name: 'Undo' }).click();
+    expect(await getRequestBody(restoreRequest)).toEqual({ ids: fixture.rawStack });
+    await expect.poll(() => getTrashStates(admin.accessToken, fixture.rawStack)).toEqual([false, false, false]);
+  });
+
+  test('trashes the marked set and restores every ID, leaving single-asset delete unchanged', async ({
+    context,
+    page,
+  }) => {
+    const { admin, fixture } = await setupViewer({ context, page });
+    await openViewer(page, fixture.ordinary);
+    await page.keyboard.press('x');
+    const nextId = await viewNextAsset(page, fixture.ordinary);
+    await page.keyboard.press('x');
+    await expect(viewerSelection(page).getByText('2 selected', { exact: true })).toBeVisible();
+    await expect(viewerSelection(page).getByRole('button', { name: 'Trash 2' })).toBeVisible();
+
+    const marked = [fixture.ordinary, nextId];
+    const trashRequest = page.waitForRequest(isDeleteRequest);
+    await page.keyboard.press('Control+Delete');
+    expect(await getRequestBody(trashRequest)).toEqual({ ids: marked, force: false });
+    await expect.poll(() => getTrashStates(admin.accessToken, marked)).toEqual([true, true]);
+    await expect(page.locator('#immich-asset-viewer')).toBeVisible();
+    await expect(page).not.toHaveURL(new RegExp(`/photos/(${marked.join('|')})`));
+    await expect(viewerSelection(page).getByText(/selected$/)).toHaveCount(0);
+
+    const restoreRequest = page.waitForRequest(isRestoreRequest);
+    await page.getByRole('button', { name: 'Undo' }).click();
+    expect(await getRequestBody(restoreRequest)).toEqual({ ids: marked });
+    await expect.poll(() => getTrashStates(admin.accessToken, marked)).toEqual([false, false]);
+
+    await page.goto(`/photos/${fixture.rawStack[0]}`);
+    await expectViewing(page, fixture.rawStack[0]);
+    const singleRequest = page.waitForRequest(isDeleteRequest);
+    await page.keyboard.press('Delete');
+    expect(await getRequestBody(singleRequest)).toEqual({ ids: [fixture.rawStack[0]], force: false });
+    await expect.poll(() => getTrashStates(admin.accessToken, fixture.rawStack)).toEqual([true, false, false]);
+  });
+
+  test('aborts whole-stack viewer actions when the stack lookup fails', async ({ context, page }) => {
+    const { admin, fixture } = await setupViewer({ context, page });
+    await openViewer(page, fixture.rawStack[0]);
+    await enableWholeStackInViewer(page);
+    await page.route('**/api/stacks/*', (route) => route.fulfill({ status: 500, body: 'stack unavailable' }));
+
+    let deleteRequests = 0;
+    page.on('request', (request) => {
+      if (isDeleteRequest(request)) {
+        deleteRequests++;
+      }
+    });
+
+    await page.getByRole('button', { name: 'Delete (3 assets)' }).click();
+    await expect(page.getByText('Unable to resolve selected stack members', { exact: true })).toBeVisible();
+    expect(deleteRequests).toBe(0);
+    await expect.poll(() => getTrashStates(admin.accessToken, fixture.rawStack)).toEqual([false, false, false]);
+
+    await page.keyboard.press('x');
+    await expect(page.getByText('Unable to resolve selected stack members', { exact: true }).first()).toBeVisible();
+    await expect(viewerSelection(page).getByText(/selected$/)).toHaveCount(0);
   });
 });

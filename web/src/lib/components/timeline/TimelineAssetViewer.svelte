@@ -1,10 +1,13 @@
 <script lang="ts">
-  import type { Action } from '$lib/components/asset-viewer/actions/action';
+  import { getActionAssetIds, type Action } from '$lib/components/asset-viewer/actions/action';
   import type { AssetCursor } from '$lib/components/asset-viewer/AssetViewer.svelte';
   import OnEvents from '$lib/components/OnEvents.svelte';
+  import ArchiveAction from '$lib/components/timeline/actions/ArchiveAction.svelte';
+  import FavoriteAction from '$lib/components/timeline/actions/FavoriteAction.svelte';
   import { AssetAction } from '$lib/constants';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
   import { assetCacheManager } from '$lib/managers/AssetCacheManager.svelte';
+  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
   import { authManager } from '$lib/managers/auth-manager.svelte';
   import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
   import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
@@ -26,6 +29,7 @@
     album?: AlbumResponseDto;
     person?: PersonResponseDto;
     removeAction?: AssetAction.UNARCHIVE | AssetAction.ARCHIVE | AssetAction.SET_VISIBILITY_TIMELINE | null;
+    selectable?: boolean;
   }
 
   let {
@@ -37,6 +41,7 @@
     isShared = false,
     album,
     person,
+    selectable = false,
   }: Props = $props();
 
   const getAsset = (id: string) => {
@@ -115,6 +120,33 @@
     }
   };
 
+  const findRemainingAsset = async (removedIds: Set<string>, direction: 'earlier' | 'later') => {
+    const step = (asset: { id: string }) =>
+      direction === 'earlier' ? timelineManager.getEarlierAsset(asset) : timelineManager.getLaterAsset(asset);
+    let candidate = await step(assetCursor.current);
+    while (candidate && removedIds.has(candidate.id)) {
+      candidate = await step(candidate);
+    }
+    return candidate;
+  };
+
+  const removeAssetsFromView = async (assetIds: string[]) => {
+    const removedIds = new Set(assetIds);
+    const current = assetCursor.current;
+    if (!removedIds.has(current.id)) {
+      timelineManager.removeAssets(assetIds);
+      return;
+    }
+
+    const remaining =
+      (await findRemainingAsset(removedIds, 'earlier')) ?? (await findRemainingAsset(removedIds, 'later'));
+    timelineManager.removeAssets(assetIds);
+    const replacement = remaining ? await getAsset(remaining.id) : undefined;
+    if (!(await navigateToAsset(replacement))) {
+      await handleClose(current.id);
+    }
+  };
+
   const handlePreAction = async (action: Action) => {
     switch (action.type) {
       case removeAction:
@@ -124,6 +156,12 @@
       case AssetAction.ARCHIVE:
       case AssetAction.SET_VISIBILITY_LOCKED:
       case AssetAction.SET_VISIBILITY_TIMELINE: {
+        const assetIds = getActionAssetIds(action);
+        if (assetIds) {
+          await removeAssetsFromView(assetIds);
+          break;
+        }
+
         // must update manager before performing any navigation
         timelineManager.removeAssets([action.asset.id]);
 
@@ -203,5 +241,21 @@
     onUndoDelete={handleUndoDelete}
     onRandom={handleRandom}
     onClose={handleClose}
-  />
+    {selectable}
+  >
+    {#snippet selectionActions()}
+      <FavoriteAction
+        menuItem
+        removeFavorite={assetMultiSelectManager.isAllFavorite}
+        onFavorite={(ids, isFavorite) => timelineManager.update(ids, (asset) => (asset.isFavorite = isFavorite))}
+      />
+      {#if assetMultiSelectManager.isAllUserOwned}
+        <ArchiveAction
+          menuItem
+          unarchive={assetMultiSelectManager.isAllArchived}
+          onArchive={(ids, visibility) => timelineManager.update(ids, (asset) => (asset.visibility = visibility))}
+        />
+      {/if}
+    {/snippet}
+  </AssetViewer>
 {/await}

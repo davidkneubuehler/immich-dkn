@@ -1,12 +1,17 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { shortcuts, type ShortcutOptions } from '$lib/actions/shortcut';
-  import type { Action } from '$lib/components/asset-viewer/actions/action';
+  import { getActionAssetIds, type Action } from '$lib/components/asset-viewer/actions/action';
   import type { AssetCursor } from '$lib/components/asset-viewer/AssetViewer.svelte';
   import Thumbnail from '$lib/components/assets/thumbnail/Thumbnail.svelte';
+  import ArchiveAction from '$lib/components/timeline/actions/ArchiveAction.svelte';
+  import FavoriteAction from '$lib/components/timeline/actions/FavoriteAction.svelte';
   import { AssetAction } from '$lib/constants';
   import Portal from '$lib/elements/Portal.svelte';
-  import type { AssetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
+  import {
+    assetMultiSelectManager,
+    type AssetMultiSelectManager,
+  } from '$lib/managers/asset-multi-select-manager.svelte';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
   import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
   import type { TimelineAsset, Viewport } from '$lib/managers/timeline-manager/types';
@@ -292,11 +297,38 @@
     }
   };
 
+  const removeAssetsFromView = async (assetIds: string[]) => {
+    const removedIds = new Set(assetIds);
+    const index = assets.findIndex((asset) => asset.id === assetCursor.current.id);
+    const currentRemoved = removedIds.has(assetCursor.current.id);
+    const replacement = currentRemoved
+      ? (assets.slice(index + 1).find((asset) => !removedIds.has(asset.id)) ??
+        assets.slice(0, Math.max(index, 0)).findLast((asset) => !removedIds.has(asset.id)))
+      : undefined;
+
+    assets = assets.filter((asset) => !removedIds.has(asset.id));
+
+    if (!currentRemoved) {
+      return;
+    }
+    if (assets.length === 0) {
+      await goto(Route.photos());
+      return;
+    }
+    await navigateToAsset(replacement);
+  };
+
   const handleAction = async (action: Action) => {
     switch (action.type) {
       case AssetAction.ARCHIVE:
       case AssetAction.DELETE:
       case AssetAction.TRASH: {
+        const assetIds = getActionAssetIds(action);
+        if (assetIds) {
+          await removeAssetsFromView(assetIds);
+          break;
+        }
+
         const nextAsset = assetCursor.nextAsset ?? assetCursor.previousAsset;
         assets.splice(
           assets.findIndex((currentAsset) => currentAsset.id === action.asset.id),
@@ -402,7 +434,25 @@
           assetViewerManager.showAssetViewer(false);
           handlePromiseError(navigate({ targetRoute: 'current', assetId: null }));
         }}
-      />
+        selectable={assetInteraction === assetMultiSelectManager}
+      >
+        {#snippet selectionActions()}
+          <FavoriteAction
+            menuItem
+            removeFavorite={assetInteraction.isAllFavorite}
+            onFavorite={(ids, isFavorite) => {
+              for (const asset of assets) {
+                if (ids.includes(asset.id)) {
+                  asset.isFavorite = isFavorite;
+                }
+              }
+            }}
+          />
+          {#if assetInteraction.isAllUserOwned}
+            <ArchiveAction menuItem unarchive={assetInteraction.isAllArchived} />
+          {/if}
+        {/snippet}
+      </AssetViewer>
     {/await}
   </Portal>
 {/if}
