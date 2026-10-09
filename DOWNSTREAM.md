@@ -4,7 +4,11 @@ This repository is an unofficial, publicly available downstream of Immich. Each 
 
 ## Included change
 
-The web application adds an opt-in whole-stack selection toggle. It is off by default, preserving upstream primary-asset selection. When enabled, a selection operation expands a selected stack primary to its members before bulk actions run. The server image contains this web patch. Mobile and machine-learning artifacts are upstream artifacts.
+The web application adds an opt-in whole-stack selection toggle. It is off by default, preserving upstream primary-asset selection. When enabled, a selection operation expands a selected stack primary to its members before bulk actions run. The toggle stays on until you leave the page.
+
+The asset viewer shares that selection with the timeline. Press `x` or the select button to mark or unmark the asset on screen, `Ctrl+D` to clear the marks, `Ctrl+Delete` to trash the marked assets (`Ctrl+Shift+Delete` deletes them permanently), and `Shift+S` to switch whole-stack selection. The viewer shows how many assets are marked and offers the other actions for them in its selection menu. Marks survive closing the viewer, and a selection made in the timeline is shown when the viewer opens. While the toggle is on, the viewer's trash, download, share, album, tag, favorite and archive actions apply to every member of the stack of the asset on screen, and their labels state how many assets they affect. Stack membership is refreshed before each action, and the action aborts with an error when the lookup fails. With the toggle off, viewer actions behave as upstream.
+
+The server image contains this web patch. Mobile and machine-learning artifacts are upstream artifacts.
 
 ## Upstream release tracking
 
@@ -144,9 +148,3 @@ Every part of it has run, but never together for a real release. Rehearsals run 
 Treat that release as unverified until it is checked. Work through the release checklist above, read the summary of the sync run that produced it, and confirm that the branch, the tag and the release all name the same commit. Deploy only after that. If a publishing step fails, the run fails and later scheduled runs skip that version; recover it as described under "Recovering a failed clean-path run".
 
 One failure mode has no rehearsal coverage: GitHub rejects ref updates from `GITHUB_TOKEN` that introduce workflow file content the repository has not seen. This can hit the `follow` job when an upstream release changes upstream's own workflow files. The job then fails with that message, and `dkn` stays on the previous release until the merge is made by hand.
-
-### Whole-stack actions in the asset viewer
-
-Planned, not started. In the asset viewer the actions still apply to the single asset on screen, so deleting a RAW and JPEG pair means leaving the viewer and selecting the stack in the timeline. The plan is to let viewer actions apply to the whole stack while the whole-stack toggle is on, matching what the toggle already does for selections in the timeline.
-
-This widens the scope rule in AGENTS.md, which today limits the downstream patch to selection behavior and keeps single-asset viewer actions as upstream has them. Agree that scope change first, then implement it. It belongs in its own release, separate from any upstream transplant, so that the release notes and the review cover exactly one behavior change.
