@@ -8,6 +8,7 @@ import {
   removeAssetFromAlbum,
   runAssetJobs,
   updateAsset,
+  updateAssets,
   type AlbumResponseDto,
   type AssetJobsDto,
   type AssetResponseDto,
@@ -57,8 +58,10 @@ import { Route } from '$lib/route';
 import { SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
 import { getAssetMediaUrl, getSharedLink, sleep } from '$lib/utils';
 import { downloadUrl } from '$lib/utils';
+import { downloadArchive } from '$lib/utils/asset-utils';
 import { handleError } from '$lib/utils/handle-error';
 import { getFormatter } from '$lib/utils/i18n';
+import { toTimelineAsset } from '$lib/utils/timeline-util';
 
 export const getAssetBulkActions = ($t: MessageFormatter, album?: AlbumResponseDto) => {
   const ownedAssets = assetMultiSelectManager.ownedAssets;
@@ -181,19 +184,46 @@ export const getAssetActions = (
   const isAlbumOwner = !!(authUser && authUser.id === album?.albumUsers[0].user.id);
   const smartSearchEnabled = featureFlagsManager.value.smartSearch;
 
+  // With whole-stack selection on, these actions apply to every member of the asset's stack.
+  const stackCount = assetMultiSelectManager.selectWholeStack && asset.stack ? asset.stack.assetCount : undefined;
+  const stackTitle = (title: string) =>
+    stackCount ? $t('whole_stack_action', { values: { action: title, count: stackCount } }) : title;
+  const forAssetOrStack = async (
+    onAsset: () => unknown,
+    onStack: (assetIds: string[]) => unknown,
+  ): Promise<unknown> => {
+    if (!stackCount) {
+      return onAsset();
+    }
+    const assets = await assetMultiSelectManager.getStackAssetsForAction(toTimelineAsset(asset));
+    if (!assets) {
+      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+      return;
+    }
+    return onStack(assets.map(({ id }) => id));
+  };
+
   const Share: ActionItem = {
-    title: $t('share'),
+    title: stackTitle($t('share')),
     icon: mdiShareVariantOutline,
     $if: () => !!(authUser && !asset.isTrashed && asset.visibility !== AssetVisibility.Locked),
-    onAction: () => modalManager.show(SharedLinkCreateModal, { assetIds: [asset.id] }),
+    onAction: () =>
+      forAssetOrStack(
+        () => modalManager.show(SharedLinkCreateModal, { assetIds: [asset.id] }),
+        (assetIds) => modalManager.show(SharedLinkCreateModal, { assetIds }),
+      ),
   };
 
   const Download: ActionItem = {
-    title: $t('download'),
+    title: stackTitle($t('download')),
     icon: mdiDownload,
     shortcuts: { key: 'd', shift: true },
     $if: () => !!authUser,
-    onAction: () => handleDownloadAsset(asset, { edited: true }),
+    onAction: () =>
+      forAssetOrStack(
+        () => handleDownloadAsset(asset, { edited: true }),
+        (assetIds) => downloadArchive('immich', { assetIds }),
+      ),
   };
 
   const DownloadOriginal: ActionItem = {
@@ -234,18 +264,26 @@ export const getAssetActions = (
   };
 
   const Favorite: ActionItem = {
-    title: $t('to_favorite'),
+    title: stackTitle($t('to_favorite')),
     icon: mdiHeartOutline,
     $if: () => isOwner && !asset.isFavorite,
-    onAction: () => handleFavorite(asset),
+    onAction: () =>
+      forAssetOrStack(
+        () => handleFavorite(asset),
+        (assetIds) => handleStackFavorite(asset, assetIds, true),
+      ),
     shortcuts: [{ key: 'f' }],
   };
 
   const Unfavorite: ActionItem = {
-    title: $t('unfavorite'),
+    title: stackTitle($t('unfavorite')),
     icon: mdiHeart,
     $if: () => isOwner && asset.isFavorite,
-    onAction: () => handleUnfavorite(asset),
+    onAction: () =>
+      forAssetOrStack(
+        () => handleUnfavorite(asset),
+        (assetIds) => handleStackFavorite(asset, assetIds, false),
+      ),
     shortcuts: [{ key: 'f' }],
   };
 
@@ -258,11 +296,15 @@ export const getAssetActions = (
   };
 
   const AddToAlbum: ActionItem = {
-    title: $t('add_to_album'),
+    title: stackTitle($t('add_to_album')),
     icon: mdiPlus,
     shortcuts: [{ key: 'l' }],
     $if: () => asset.visibility !== AssetVisibility.Locked && !asset.isTrashed,
-    onAction: () => modalManager.show(AssetAddToAlbumModal, { assetIds: [asset.id] }),
+    onAction: () =>
+      forAssetOrStack(
+        () => modalManager.show(AssetAddToAlbumModal, { assetIds: [asset.id] }),
+        (assetIds) => modalManager.show(AssetAddToAlbumModal, { assetIds }),
+      ),
   };
 
   const RemoveFromAlbum: ActionItem = {
@@ -311,10 +353,14 @@ export const getAssetActions = (
   };
 
   const Tag: ActionItem = {
-    title: $t('add_tag'),
+    title: stackTitle($t('add_tag')),
     icon: mdiTagPlusOutline,
     $if: () => authManager.authenticated && authManager.preferences.tags.enabled,
-    onAction: () => modalManager.show(AssetTagModal, { assetIds: [asset.id] }),
+    onAction: () =>
+      forAssetOrStack(
+        () => modalManager.show(AssetTagModal, { assetIds: [asset.id] }),
+        (assetIds) => modalManager.show(AssetTagModal, { assetIds }),
+      ),
     shortcuts: { key: 't' },
   };
 
@@ -479,6 +525,22 @@ const handleFavorite = async (asset: AssetResponseDto) => {
     eventManager.emit('AssetUpdate', response);
   } catch (error) {
     handleError(error, $t('errors.unable_to_add_remove_favorites', { values: { favorite: asset.isFavorite } }));
+  }
+};
+
+const handleStackFavorite = async (asset: AssetResponseDto, assetIds: string[], isFavorite: boolean) => {
+  const $t = await getFormatter();
+
+  try {
+    await updateAssets({ assetBulkUpdateDto: { ids: assetIds, isFavorite } });
+    toastManager.primary(
+      isFavorite
+        ? $t('added_to_favorites_count', { values: { count: assetIds.length } })
+        : $t('removed_from_favorites_count', { values: { count: assetIds.length } }),
+    );
+    eventManager.emit('AssetUpdate', await getAssetInfo({ ...authManager.params, id: asset.id }));
+  } catch (error) {
+    handleError(error, $t('errors.unable_to_add_remove_favorites', { values: { favorite: !isFavorite } }));
   }
 };
 

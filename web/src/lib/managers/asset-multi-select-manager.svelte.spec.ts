@@ -1,6 +1,7 @@
 import { AssetVisibility, getStack, type StackResponseDto } from '@immich/sdk';
 import { AssetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
 import { authManager } from '$lib/managers/auth-manager.svelte';
+import { eventManager } from '$lib/managers/event-manager.svelte';
 import { assetFactory, timelineAssetFactory } from '@test-data/factories/asset-factory';
 import { preferencesFactory } from '@test-data/factories/preferences-factory';
 import { userAdminFactory } from '@test-data/factories/user-factory';
@@ -361,5 +362,100 @@ describe('AssetMultiSelectManager', () => {
 
     await expect(enableWholeStack).resolves.toBe(true);
     expect(sut.selectWholeStack).toBe(true);
+  });
+
+  describe('selection shared with the asset viewer', () => {
+    const rawPrimaryStack = () => {
+      const [raw, jpeg, edit] = assetFactory.buildList(3);
+      return { stack: { id: 'raw-stack', primaryAssetId: raw.id, assets: [raw, jpeg, edit] }, raw, jpeg, edit };
+    };
+
+    it('keeps whole-stack mode when the selection is cleared and turns it off on reset', async () => {
+      await sut.setSelectWholeStack(true);
+      sut.selectAsset(timelineAssetFactory.build());
+
+      sut.clear();
+      expect(sut.selectionActive).toBe(false);
+      expect(sut.selectWholeStack).toBe(true);
+
+      sut.reset();
+      expect(sut.selectWholeStack).toBe(false);
+    });
+
+    it('resets whole-stack mode when the page changes', async () => {
+      const navigating = new AssetMultiSelectManager({ resetOnNavigate: true });
+      await navigating.setSelectWholeStack(true);
+      navigating.selectAsset(timelineAssetFactory.build());
+
+      eventManager.emit('AppNavigate');
+
+      expect(navigating.selectionActive).toBe(false);
+      expect(navigating.selectWholeStack).toBe(false);
+      navigating.destroy();
+    });
+
+    it('returns only the asset when whole-stack mode is off', async () => {
+      const asset = timelineAssetFactory.build({ stack: { id: 'raw-stack', assetCount: 3, primaryAssetId: 'raw' } });
+
+      await expect(sut.getStackAssetsForAction(asset)).resolves.toEqual([asset]);
+      expect(getStackMock).not.toHaveBeenCalled();
+    });
+
+    it('refreshes every member of a RAW-primary stack with more than two assets', async () => {
+      const { stack, raw, jpeg, edit } = rawPrimaryStack();
+      getStackMock.mockResolvedValue(stack);
+      await sut.setSelectWholeStack(true);
+      const asset = timelineAssetFactory.build({
+        id: jpeg.id,
+        stack: { id: stack.id, assetCount: 2, primaryAssetId: raw.id },
+      });
+
+      const assets = await sut.getStackAssetsForAction(asset);
+
+      expect(getStackMock).toHaveBeenCalledWith({ id: stack.id });
+      expect(assets?.map(({ id }) => id)).toEqual([raw.id, jpeg.id, edit.id]);
+    });
+
+    it('returns undefined instead of the single asset when the stack lookup fails', async () => {
+      await sut.setSelectWholeStack(true);
+      getStackMock.mockRejectedValue(new Error('lookup failed'));
+      const asset = timelineAssetFactory.build({ stack: { id: 'raw-stack', assetCount: 2, primaryAssetId: 'raw' } });
+
+      await expect(sut.getStackAssetsForAction(asset)).resolves.toBeUndefined();
+    });
+
+    it('returns the asset alone when the refreshed stack no longer contains it', async () => {
+      const { stack } = rawPrimaryStack();
+      getStackMock.mockResolvedValue(stack);
+      await sut.setSelectWholeStack(true);
+      const asset = timelineAssetFactory.build({ stack: { id: stack.id, assetCount: 3, primaryAssetId: 'raw' } });
+
+      await expect(sut.getStackAssetsForAction(asset)).resolves.toEqual([asset]);
+    });
+
+    it('unmarks a whole stack from any of its members', async () => {
+      const { stack, raw, jpeg } = rawPrimaryStack();
+      getStackMock.mockResolvedValue(stack);
+      const stackRef = { id: stack.id, assetCount: 3, primaryAssetId: raw.id };
+      const ordinary = timelineAssetFactory.build();
+      await sut.setSelectWholeStack(true);
+      await sut.addAssetsWithStacks([timelineAssetFactory.build({ id: raw.id, stack: stackRef }), ordinary]);
+      expect(sut.assets).toHaveLength(4);
+
+      sut.removeAssetWithStack(timelineAssetFactory.build({ id: jpeg.id, stack: stackRef }));
+
+      expect(sut.assets.map(({ id }) => id)).toEqual([ordinary.id]);
+    });
+
+    it('unmarks only the asset when whole-stack mode is off', () => {
+      const stackRef = { id: 'raw-stack', assetCount: 2, primaryAssetId: 'raw' };
+      const primary = timelineAssetFactory.build({ stack: stackRef });
+      const member = timelineAssetFactory.build({ stack: stackRef });
+      sut.selectAssets([primary, member]);
+
+      sut.removeAssetWithStack(member);
+
+      expect(sut.assets.map(({ id }) => id)).toEqual([primary.id]);
+    });
   });
 });
