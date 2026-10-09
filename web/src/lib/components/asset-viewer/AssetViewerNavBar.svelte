@@ -82,7 +82,14 @@
     onAction: () => setPlayOriginalVideo(!isPlayingOriginalVideo),
   });
 
-  const Actions = $derived(getAssetActions($t, { ...asset, stackPrimaryAssetId: stack?.primaryAssetId }, album));
+  // Asset updates from the server carry no stack summary, so fall back to the stack the viewer loaded.
+  const stackSummary = $derived(
+    asset.stack ??
+      (stack ? { id: stack.id, primaryAssetId: stack.primaryAssetId, assetCount: stack.assets.length } : undefined),
+  );
+  const Actions = $derived(
+    getAssetActions($t, { ...asset, stack: stackSummary, stackPrimaryAssetId: stack?.primaryAssetId }, album),
+  );
   const StackActions = $derived(getStackActions($t, stack, asset));
   const sharedLink = getSharedLink();
   const showSelectionControls = $derived(selectable && authManager.authenticated && !sharedLink);
@@ -96,7 +103,14 @@
   <div class="dark flex items-center gap-1">
     <ActionButton action={Close} />
     {#if showSelectionControls}
-      <ViewerSelectionControls {asset} {album} {preAction} {onAction} {onUndoDelete} {selectionActions} />
+      <ViewerSelectionControls
+        asset={{ ...asset, stack: stackSummary }}
+        {album}
+        {preAction}
+        {onAction}
+        {onUndoDelete}
+        {selectionActions}
+      />
     {/if}
   </div>
 
@@ -128,7 +142,7 @@
     <ActionButton action={Actions.Edit} />
 
     {#if isOwner}
-      <DeleteAction {asset} {onAction} {preAction} {onUndoDelete} />
+      <DeleteAction {asset} {stackSummary} {onAction} {preAction} {onUndoDelete} />
     {/if}
 
     {#if !sharedLink}
@@ -163,7 +177,7 @@
         <ActionMenuItem action={Actions.SetProfilePicture} />
 
         {#if isOwner && !isLocked}
-          <ArchiveAction {asset} {onAction} {preAction} />
+          <ArchiveAction {asset} {stackSummary} {onAction} {preAction} />
         {/if}
         <ActionMenuItem action={Actions.ViewInTimeline} />
         <ActionMenuItem action={Actions.ViewSimilar} />

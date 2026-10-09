@@ -527,7 +527,10 @@ test.describe('Asset viewer selection', () => {
     const { admin, fixture } = await setupViewer({ context, page });
     await openViewer(page, fixture.ordinary);
     await page.keyboard.press('x');
+    await expect(viewerSelection(page).getByText('1 selected', { exact: true })).toBeVisible();
     const nextId = await viewNextAsset(page, fixture.ordinary);
+    // Wait until the viewer shows the next, unmarked asset before marking it.
+    await expect(markButton(page)).toHaveAttribute('aria-pressed', 'false');
     await page.keyboard.press('x');
     await expect(viewerSelection(page).getByText('2 selected', { exact: true })).toBeVisible();
     await expect(viewerSelection(page).getByRole('button', { name: 'Trash 2' })).toBeVisible();
