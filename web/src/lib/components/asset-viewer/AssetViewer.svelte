@@ -2,7 +2,12 @@
   import { browser } from '$app/environment';
   import { focusTrap } from '$lib/actions/focus-trap';
   import { shortcuts } from '$lib/actions/shortcut';
-  import type { Action, OnAction, PreAction } from '$lib/components/asset-viewer/actions/action';
+  import {
+    getActionAssetIds,
+    type Action,
+    type OnAction,
+    type PreAction,
+  } from '$lib/components/asset-viewer/actions/action';
   import NextAssetAction from '$lib/components/asset-viewer/actions/NextAssetAction.svelte';
   import PreviousAssetAction from '$lib/components/asset-viewer/actions/PreviousAssetAction.svelte';
   import AssetViewerNavBar from '$lib/components/asset-viewer/AssetViewerNavBar.svelte';
@@ -38,7 +43,7 @@
     type StackResponseDto,
   } from '@immich/sdk';
   import { CommandPaletteDefaultProvider } from '@immich/ui';
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
   import type { SwipeCustomEvent } from 'svelte-gestures';
   import { t } from 'svelte-i18n';
   import { fly } from 'svelte/transition';
@@ -74,6 +79,10 @@
     onUndoDelete?: OnUndoDelete;
     onClose?: (assetId: string) => void;
     onRandom?: () => Promise<{ id: string } | undefined>;
+    /** Lets the viewer mark assets in the shared multi-select selection. */
+    selectable?: boolean;
+    /** Host-specific actions on the marked assets, shown in the viewer's selection menu. */
+    selectionActions?: Snippet;
   }
 
   let {
@@ -89,6 +98,8 @@
     onUndoDelete,
     onClose,
     onRandom,
+    selectable = false,
+    selectionActions,
   }: Props = $props();
 
   const {
@@ -357,7 +368,7 @@
     switch (action.type) {
       case AssetAction.DELETE:
       case AssetAction.TRASH: {
-        eventManager.emit('AssetsDelete', [asset.id]);
+        eventManager.emit('AssetsDelete', getActionAssetIds(action) ?? [asset.id]);
         break;
       }
       case AssetAction.RATING: {
@@ -529,6 +540,8 @@
         onClose={onClose ? () => onClose(stack?.primaryAssetId ?? asset.id) : undefined}
         {isPlayingOriginalVideo}
         {setPlayOriginalVideo}
+        {selectable}
+        {selectionActions}
       />
     </div>
   {/if}

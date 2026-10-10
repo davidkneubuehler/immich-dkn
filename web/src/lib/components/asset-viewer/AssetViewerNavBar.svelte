@@ -5,6 +5,7 @@
   import DeleteAction from '$lib/components/asset-viewer/actions/DeleteAction.svelte';
   import RestoreAction from '$lib/components/asset-viewer/actions/RestoreAction.svelte';
   import SetVisibilityAction from '$lib/components/asset-viewer/actions/SetVisibilityAction.svelte';
+  import ViewerSelectionControls from '$lib/components/asset-viewer/ViewerSelectionControls.svelte';
   import LoadingDots from '$lib/components/LoadingDots.svelte';
   import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
@@ -28,6 +29,7 @@
   } from '@immich/sdk';
   import { ActionButton, CommandPaletteDefaultProvider, Tooltip, type ActionItem } from '@immich/ui';
   import { mdiArrowLeft, mdiArrowRight, mdiDotsVertical, mdiVideoOutline } from '@mdi/js';
+  import type { Snippet } from 'svelte';
   import { t } from 'svelte-i18n';
 
   interface Props {
@@ -41,6 +43,8 @@
     onClose?: () => void;
     isPlayingOriginalVideo: boolean;
     setPlayOriginalVideo: (value: boolean) => void;
+    selectable?: boolean;
+    selectionActions?: Snippet;
   }
 
   let {
@@ -54,6 +58,8 @@
     onClose,
     isPlayingOriginalVideo = false,
     setPlayOriginalVideo,
+    selectable = false,
+    selectionActions,
   }: Props = $props();
 
   const isOwner = $derived(authManager.authenticated && asset.ownerId === authManager.user.id);
@@ -76,9 +82,17 @@
     onAction: () => setPlayOriginalVideo(!isPlayingOriginalVideo),
   });
 
-  const Actions = $derived(getAssetActions($t, { ...asset, stackPrimaryAssetId: stack?.primaryAssetId }, album));
+  // Asset updates from the server carry no stack summary, so fall back to the stack the viewer loaded.
+  const stackSummary = $derived(
+    asset.stack ??
+      (stack ? { id: stack.id, primaryAssetId: stack.primaryAssetId, assetCount: stack.assets.length } : undefined),
+  );
+  const Actions = $derived(
+    getAssetActions($t, { ...asset, stack: stackSummary, stackPrimaryAssetId: stack?.primaryAssetId }, album),
+  );
   const StackActions = $derived(getStackActions($t, stack, asset));
   const sharedLink = getSharedLink();
+  const showSelectionControls = $derived(selectable && authManager.authenticated && !sharedLink);
 </script>
 
 <CommandPaletteDefaultProvider name={$t('assets')} actions={withoutIcons([Close, Cast, ...Object.values(Actions)])} />
@@ -86,8 +100,18 @@
 <div
   class="flex h-16 place-items-center justify-between bg-linear-to-b from-black/40 px-3 drop-shadow-[0_0_1px_rgba(0,0,0,0.4)] transition-transform duration-200"
 >
-  <div class="dark">
+  <div class="dark flex items-center gap-1">
     <ActionButton action={Close} />
+    {#if showSelectionControls}
+      <ViewerSelectionControls
+        asset={{ ...asset, stack: stackSummary }}
+        {album}
+        {preAction}
+        {onAction}
+        {onUndoDelete}
+        {selectionActions}
+      />
+    {/if}
   </div>
 
   <div
@@ -118,7 +142,7 @@
     <ActionButton action={Actions.Edit} />
 
     {#if isOwner}
-      <DeleteAction {asset} {onAction} {preAction} {onUndoDelete} />
+      <DeleteAction {asset} {stackSummary} {onAction} {preAction} {onUndoDelete} />
     {/if}
 
     {#if !sharedLink}
@@ -153,7 +177,7 @@
         <ActionMenuItem action={Actions.SetProfilePicture} />
 
         {#if isOwner && !isLocked}
-          <ArchiveAction {asset} {onAction} {preAction} />
+          <ArchiveAction {asset} {stackSummary} {onAction} {preAction} />
         {/if}
         <ActionMenuItem action={Actions.ViewInTimeline} />
         <ActionMenuItem action={Actions.ViewSimilar} />

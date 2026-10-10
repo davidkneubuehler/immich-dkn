@@ -47,7 +47,7 @@ export class AssetMultiSelectManager {
   constructor(options?: AssetMultiSelectOptions) {
     const { resetOnNavigate = false } = options ?? {};
     if (resetOnNavigate) {
-      this.#unsubscribe = eventManager.on({ AppNavigate: () => this.clear() });
+      this.#unsubscribe = eventManager.on({ AppNavigate: () => this.reset() });
     }
   }
 
@@ -127,6 +127,38 @@ export class AssetMultiSelectManager {
     return this.addAssetsWithStacks([asset]);
   }
 
+  /** Removes an asset and, in whole-stack mode, every explicitly selected member of its stack. */
+  removeAssetWithStack(asset: TimelineAsset) {
+    const stackId = this.selectWholeStack ? asset.stack?.id : undefined;
+    for (const selected of Array.from(this.#explicitMap.values())) {
+      if (selected.id === asset.id || (stackId && selected.stack?.id === stackId)) {
+        this.#explicitMap.delete(selected.id);
+      }
+    }
+    this.#invalidateStackMembers();
+    if (this.selectWholeStack) {
+      void this.#refreshStackMembers();
+    }
+  }
+
+  /**
+   * Returns the assets a single-asset action applies to: the asset alone, or in whole-stack mode its current stack
+   * members. Returns undefined when the stack lookup fails, so the action aborts instead of acting on one member.
+   */
+  async getStackAssetsForAction(asset: TimelineAsset): Promise<TimelineAsset[] | undefined> {
+    if (!this.selectWholeStack || !asset.stack) {
+      return [asset];
+    }
+
+    try {
+      const stack = await getStack({ id: asset.stack.id });
+      const members = stack.assets.map((member) => toTimelineAsset(member));
+      return members.some((member) => member.id === asset.id) ? members : [asset];
+    } catch {
+      return undefined;
+    }
+  }
+
   async setSelectWholeStack(enabled: boolean) {
     this.selectWholeStack = enabled;
     this.#invalidateStackMembers();
@@ -190,7 +222,6 @@ export class AssetMultiSelectManager {
 
   clear() {
     this.selectAll = false;
-    this.selectWholeStack = false;
 
     // Multi-selection
     this.#explicitMap.clear();
@@ -200,6 +231,12 @@ export class AssetMultiSelectManager {
     // Range selection
     this.candidates = [];
     this.startAsset = null;
+  }
+
+  /** Clears the selection and turns whole-stack selection off, as when leaving the page. */
+  reset() {
+    this.clear();
+    this.selectWholeStack = false;
   }
 
   async #refreshStackMembers() {
