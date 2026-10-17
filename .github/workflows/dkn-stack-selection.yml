@@ -121,7 +121,16 @@ jobs:
         run: pnpm exec playwright install chromium --only-shell
 
       - name: Start E2E environment
-        run: docker compose up -d --build --renew-anon-volumes --force-recreate --remove-orphans --wait --wait-timeout 300
+        # Image pulls hit registry rate limits now and then, so a failed start only costs retries.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if docker compose up -d --build --renew-anon-volumes --force-recreate --remove-orphans --wait --wait-timeout 300; then
+              exit 0
+            fi
+            sleep $((attempt * 30))
+          done
+          echo "::error title=E2E environment::docker compose up failed after 5 attempts."
+          exit 1
 
       - name: Run downstream web specifications
         env:
