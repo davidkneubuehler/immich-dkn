@@ -1,0 +1,1653 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?David=20Kneub=C3=BChler?=
+ <26619522+davidkneubuehler@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 17:16:06 +0200
+Subject: [PATCH 2/3] feat(web): select assets and act on whole stacks in the
+ asset viewer
+
+The asset viewer can mark and unmark the asset on screen in the shared
+multi-select selection (x or the select button), clear the marks
+(Ctrl+D), trash or delete the marked set (Ctrl+Delete,
+Ctrl+Shift+Delete), and offer the other marked-set actions in a menu.
+Marks survive leaving the viewer, and a timeline selection shows when it
+opens.
+
+While Select whole stack is on (Shift+S in the viewer), viewer trash,
+download, share, album, tag, favorite and archive actions apply to every
+member of the stack on screen. Membership is refreshed before acting and
+the action aborts when the lookup fails. Labels state the asset count.
+The toggle now stays on until the page changes. With the toggle off,
+viewer actions behave as upstream.
+---
+ e2e/src/specs/web/stack-selection.e2e-spec.ts | 274 +++++++++++++++++-
+ i18n/en.json                                  |   6 +
+ .../asset-viewer/AssetViewer.svelte           |  19 +-
+ .../asset-viewer/AssetViewerNavBar.svelte     |  12 +-
+ .../ViewerSelectionControls.svelte            | 199 +++++++++++++
+ .../asset-viewer/actions/ArchiveAction.svelte |  41 ++-
+ .../asset-viewer/actions/DeleteAction.spec.ts |  57 +++-
+ .../asset-viewer/actions/DeleteAction.svelte  |  36 ++-
+ .../components/asset-viewer/actions/action.ts |  14 +-
+ .../gallery-viewer/GalleryViewer.svelte       |  56 +++-
+ .../lib/components/timeline/Timeline.svelte   |  16 +-
+ .../timeline/TimelineAssetViewer.svelte       |  58 +++-
+ .../asset-multi-select-manager.svelte.spec.ts |  96 ++++++
+ .../asset-multi-select-manager.svelte.ts      |  41 ++-
+ web/src/lib/modals/ShortcutsModal.svelte      |   3 +
+ web/src/lib/services/asset.service.spec.ts    |  91 +++++-
+ web/src/lib/services/asset.service.ts         |  86 +++++-
+ 17 files changed, 1066 insertions(+), 39 deletions(-)
+ create mode 100644 web/src/lib/components/asset-viewer/ViewerSelectionControls.svelte
+
+diff --git a/e2e/src/specs/web/stack-selection.e2e-spec.ts b/e2e/src/specs/web/stack-selection.e2e-spec.ts
+index 8e0259335..7016b6ad8 100644
+--- a/e2e/src/specs/web/stack-selection.e2e-spec.ts
++++ b/e2e/src/specs/web/stack-selection.e2e-spec.ts
+@@ -1,7 +1,7 @@
+-import { AssetVisibility, type LoginResponseDto } from '@immich/sdk';
++import { AssetVisibility, updateStack, type LoginResponseDto } from '@immich/sdk';
+ import { expect, test, type BrowserContext, type Page, type Request } from '@playwright/test';
+ import { readFileSync } from 'node:fs';
+-import { testAssetDir, utils } from 'src/utils.js';
++import { asBearerAuth, testAssetDir, utils } from 'src/utils.js';
+ 
+ type Fixture = {
+   stackOne: string[];
+@@ -84,8 +84,13 @@ const setup = async ({
+ 
+ const selectExpandedStack = async (page: Page, fixture: Fixture) => {
+   await selectAsset(page, fixture.stackOne[0]);
+-  await expect(page.getByText('1 selected')).toBeVisible();
+-  await page.getByText('Select whole stack').locator('..').getByRole('switch').click();
++  // The toggle stays on after an action clears the selection, so only switch it on when it is off.
++  const switchControl = page.getByText('Select whole stack').locator('..').getByRole('switch');
++  if (!(await switchControl.isChecked())) {
++    await expect(page.getByText('1 selected')).toBeVisible();
++    await switchControl.click();
++  }
++  await expect(switchControl).toBeChecked();
+   await expect(page.getByText('2 selected')).toBeVisible();
+ };
+ 
+@@ -311,3 +316,264 @@ test.describe('Stack selection', () => {
+     await expect(page.getByText('1 selected')).toBeVisible();
+   });
+ });
++
++type ViewerFixture = {
++  /** RAW primary followed by its JPEG and a third member. */
++  rawStack: string[];
++  jpegStack: string[];
++  ordinary: string;
++};
++
++const createViewerFixture = async (admin: LoginResponseDto): Promise<ViewerFixture> => {
++  const [raw, rawJpeg, rawExtra, jpeg, jpegRaw, ordinary] = await Promise.all([
++    utils.createAsset(admin.accessToken, {
++      fileCreatedAt: '2024-01-01T10:00:00.000Z',
++      assetData: { bytes: rawTwo, filename: 'viewer-raw.nef' },
++    }),
++    utils.createAsset(admin.accessToken, {
++      fileCreatedAt: '2024-01-01T10:00:01.000Z',
++      assetData: { bytes: jpgTwo, filename: 'viewer-raw.jpg' },
++    }),
++    utils.createAsset(admin.accessToken, { fileCreatedAt: '2024-01-01T10:00:02.000Z' }),
++    utils.createAsset(admin.accessToken, {
++      fileCreatedAt: '2024-01-02T10:00:00.000Z',
++      assetData: { bytes: jpgOne, filename: 'viewer-jpeg.jpg' },
++    }),
++    utils.createAsset(admin.accessToken, {
++      fileCreatedAt: '2024-01-02T10:00:01.000Z',
++      assetData: { bytes: rawOne, filename: 'viewer-jpeg.nef' },
++    }),
++    utils.createAsset(admin.accessToken, {
++      fileCreatedAt: '2024-01-03T10:00:00.000Z',
++      assetData: { bytes: ordinaryJpg, filename: 'viewer-ordinary.jpg' },
++    }),
++  ]);
++
++  await utils.waitForQueueFinish(admin.accessToken, 'metadataExtraction');
++  const [rawStack, jpegStack] = await Promise.all([
++    utils.createStack(admin.accessToken, [raw.id, rawJpeg.id, rawExtra.id]),
++    utils.createStack(admin.accessToken, [jpeg.id, jpegRaw.id]),
++  ]);
++  await Promise.all([
++    updateStack(
++      { id: rawStack.id, stackUpdateDto: { primaryAssetId: raw.id } },
++      { headers: asBearerAuth(admin.accessToken) },
++    ),
++    updateStack(
++      { id: jpegStack.id, stackUpdateDto: { primaryAssetId: jpeg.id } },
++      { headers: asBearerAuth(admin.accessToken) },
++    ),
++  ]);
++
++  return {
++    rawStack: [raw.id, rawJpeg.id, rawExtra.id],
++    jpegStack: [jpeg.id, jpegRaw.id],
++    ordinary: ordinary.id,
++  };
++};
++
++const setupViewer = async ({ context, page }: { context: BrowserContext; page: Page }) => {
++  utils.initSdk();
++  await utils.resetDatabase();
++  const admin = await utils.adminSetup();
++  const fixture = await createViewerFixture(admin);
++  await utils.setAuthCookies(context, admin.accessToken);
++  await page.goto('/photos');
++  await page.waitForLoadState('networkidle');
++  await page.locator(`[data-asset="${fixture.rawStack[0]}"]`).waitFor();
++  return { admin, fixture };
++};
++
++const viewerSelection = (page: Page) => page.getByTestId('asset-viewer-selection');
++
++const expectViewing = async (page: Page, id: string) => {
++  await expect(page).toHaveURL(new RegExp(`/photos/${id}`));
++  await expect(page.locator('#immich-asset-viewer')).toBeVisible();
++};
++
++const openViewer = async (page: Page, id: string) => {
++  const asset = page.locator(`[data-asset="${id}"]`).first();
++  await asset.scrollIntoViewIfNeeded();
++  await asset.click();
++  await expectViewing(page, id);
++};
++
++const previewFromSelection = async (page: Page, id: string) => {
++  const asset = page.locator(`[data-asset="${id}"]`).first();
++  await asset.scrollIntoViewIfNeeded();
++  await asset.hover();
++  await asset.getByRole('button', { name: 'Preview asset' }).click();
++  await expectViewing(page, id);
++};
++
++const viewNextAsset = async (page: Page, currentId: string) => {
++  await page.keyboard.press('ArrowRight');
++  await expect(page).not.toHaveURL(new RegExp(`/photos/${currentId}`));
++  await expect(page.locator('#immich-asset-viewer')).toBeVisible();
++  const nextId = new URL(page.url()).pathname.split('/').pop()!;
++  expect(nextId).toMatch(/^[0-9a-f-]{36}$/);
++  return nextId;
++};
++
++const markButton = (page: Page) => viewerSelection(page).getByRole('button', { name: /^(Select|Deselect) asset$/ });
++
++const enableWholeStackInViewer = async (page: Page) => {
++  await page.keyboard.press('Shift+S');
++  await expect(viewerSelection(page).getByRole('switch')).toBeChecked();
++};
++
++const isDeleteRequest = (request: Request) => request.url().endsWith('/api/assets') && request.method() === 'DELETE';
++const isRestoreRequest = (request: Request) => request.url().endsWith('/api/trash/restore/assets');
++
++test.describe('Asset viewer selection', () => {
++  test.beforeAll(() => utils.initSdk());
++
++  test('marks and unmarks assets and shares the selection with the timeline', async ({ context, page }) => {
++    const { fixture } = await setupViewer({ context, page });
++
++    await openViewer(page, fixture.ordinary);
++    await expect(markButton(page)).toHaveAttribute('aria-pressed', 'false');
++    await page.keyboard.press('x');
++    await expect(viewerSelection(page).getByText('1 selected', { exact: true })).toBeVisible();
++    await expect(viewerSelection(page).getByRole('button', { name: 'Deselect asset' })).toHaveAttribute(
++      'aria-pressed',
++      'true',
++    );
++
++    const nextId = await viewNextAsset(page, fixture.ordinary);
++    await expect(markButton(page)).toHaveAttribute('aria-pressed', 'false');
++    await page.keyboard.press('x');
++    await expect(viewerSelection(page).getByText('2 selected', { exact: true })).toBeVisible();
++
++    await viewerSelection(page).getByRole('button', { name: 'Deselect asset' }).click();
++    await expect(viewerSelection(page).getByText('1 selected', { exact: true })).toBeVisible();
++    await viewerSelection(page).getByRole('button', { name: 'Select asset' }).click();
++    await expect(viewerSelection(page).getByText('2 selected', { exact: true })).toBeVisible();
++
++    await page.keyboard.press('Escape');
++    await expect(page.locator('#immich-asset-viewer')).toHaveCount(0);
++    await expect(page.getByText('2 selected')).toBeVisible();
++
++    const timelineSelected = [fixture.jpegStack[0], fixture.rawStack[0]].find((id) => id !== nextId)!;
++    await selectAsset(page, timelineSelected);
++    await expect(page.getByText('3 selected')).toBeVisible();
++    await previewFromSelection(page, timelineSelected);
++    await expect(viewerSelection(page).getByText('3 selected', { exact: true })).toBeVisible();
++    await expect(viewerSelection(page).getByRole('button', { name: 'Deselect asset' })).toBeVisible();
++
++    await page.keyboard.press('Control+d');
++    await expect(viewerSelection(page).getByText(/selected$/)).toHaveCount(0);
++    await page.keyboard.press('Escape');
++    await expect(page.getByText(/\d+ selected/)).toHaveCount(0);
++  });
++
++  test('expands marks and actions to a RAW-primary stack only while the toggle is on', async ({ context, page }) => {
++    const { admin, fixture } = await setupViewer({ context, page });
++    const album = await utils.createAlbum(admin.accessToken, { albumName: 'Viewer stack album' });
++    const addToAlbum = async (title: string, expected: string[]) => {
++      const request = page.waitForRequest((request) => request.url().endsWith(`/api/albums/${album.id}/assets`));
++      await page.getByRole('button', { name: 'More' }).click();
++      await page.getByRole('menuitem', { name: title }).click();
++      await page.getByRole('dialog').getByRole('button', { name: album.albumName }).first().click();
++      expect(await getRequestBody(request)).toEqual({ ids: expected });
++      await expect(page.getByRole('dialog')).toHaveCount(0);
++    };
++
++    await openViewer(page, fixture.rawStack[0]);
++    await expect(viewerSelection(page).getByRole('switch')).not.toBeChecked();
++    await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeVisible();
++    await addToAlbum('Add to album', [fixture.rawStack[0]]);
++
++    await enableWholeStackInViewer(page);
++    await expect(page.getByRole('button', { name: 'Delete (3 assets)' })).toBeVisible();
++    await addToAlbum('Add to album (3 assets)', fixture.rawStack);
++
++    await page.keyboard.press('x');
++    await expect(viewerSelection(page).getByText('3 selected', { exact: true })).toBeVisible();
++    await expect(viewerSelection(page).getByText('2 hidden stack members included', { exact: true })).toBeVisible();
++    await expect(viewerSelection(page).getByRole('button', { name: 'Trash 3' })).toBeVisible();
++
++    await page.keyboard.press('Control+d');
++    await expect(viewerSelection(page).getByText(/selected$/)).toHaveCount(0);
++    await expect(viewerSelection(page).getByRole('switch')).toBeChecked();
++
++    await page.keyboard.press('Shift+S');
++    await expect(viewerSelection(page).getByRole('switch')).not.toBeChecked();
++    await page.keyboard.press('x');
++    await expect(viewerSelection(page).getByText('1 selected', { exact: true })).toBeVisible();
++  });
++
++  test('trashes a whole stack from the viewer and restores every ID', async ({ context, page }) => {
++    const { admin, fixture } = await setupViewer({ context, page });
++    await openViewer(page, fixture.rawStack[0]);
++    await enableWholeStackInViewer(page);
++
++    const trashRequest = page.waitForRequest(isDeleteRequest);
++    await page.getByRole('button', { name: 'Delete (3 assets)' }).click();
++    expect(await getRequestBody(trashRequest)).toEqual({ ids: fixture.rawStack, force: false });
++    await expect.poll(() => getTrashStates(admin.accessToken, fixture.rawStack)).toEqual([true, true, true]);
++    await expect(page.getByText('Trashed 3 assets')).toBeVisible();
++
++    const restoreRequest = page.waitForRequest(isRestoreRequest);
++    await page.getByRole('button', { name: 'Undo' }).click();
++    expect(await getRequestBody(restoreRequest)).toEqual({ ids: fixture.rawStack });
++    await expect.poll(() => getTrashStates(admin.accessToken, fixture.rawStack)).toEqual([false, false, false]);
++  });
++
++  test('trashes the marked set and restores every ID, leaving single-asset delete unchanged', async ({
++    context,
++    page,
++  }) => {
++    const { admin, fixture } = await setupViewer({ context, page });
++    await openViewer(page, fixture.ordinary);
++    await page.keyboard.press('x');
++    const nextId = await viewNextAsset(page, fixture.ordinary);
++    await page.keyboard.press('x');
++    await expect(viewerSelection(page).getByText('2 selected', { exact: true })).toBeVisible();
++    await expect(viewerSelection(page).getByRole('button', { name: 'Trash 2' })).toBeVisible();
++
++    const marked = [fixture.ordinary, nextId];
++    const trashRequest = page.waitForRequest(isDeleteRequest);
++    await page.keyboard.press('Control+Delete');
++    expect(await getRequestBody(trashRequest)).toEqual({ ids: marked, force: false });
++    await expect.poll(() => getTrashStates(admin.accessToken, marked)).toEqual([true, true]);
++    await expect(page.locator('#immich-asset-viewer')).toBeVisible();
++    await expect(page).not.toHaveURL(new RegExp(`/photos/(${marked.join('|')})`));
++    await expect(viewerSelection(page).getByText(/selected$/)).toHaveCount(0);
++
++    const restoreRequest = page.waitForRequest(isRestoreRequest);
++    await page.getByRole('button', { name: 'Undo' }).click();
++    expect(await getRequestBody(restoreRequest)).toEqual({ ids: marked });
++    await expect.poll(() => getTrashStates(admin.accessToken, marked)).toEqual([false, false]);
++
++    await page.goto(`/photos/${fixture.rawStack[0]}`);
++    await expectViewing(page, fixture.rawStack[0]);
++    const singleRequest = page.waitForRequest(isDeleteRequest);
++    await page.keyboard.press('Delete');
++    expect(await getRequestBody(singleRequest)).toEqual({ ids: [fixture.rawStack[0]], force: false });
++    await expect.poll(() => getTrashStates(admin.accessToken, fixture.rawStack)).toEqual([true, false, false]);
++  });
++
++  test('aborts whole-stack viewer actions when the stack lookup fails', async ({ context, page }) => {
++    const { admin, fixture } = await setupViewer({ context, page });
++    await openViewer(page, fixture.rawStack[0]);
++    await enableWholeStackInViewer(page);
++    await page.route('**/api/stacks/*', (route) => route.fulfill({ status: 500, body: 'stack unavailable' }));
++
++    let deleteRequests = 0;
++    page.on('request', (request) => {
++      if (isDeleteRequest(request)) {
++        deleteRequests++;
++      }
++    });
++
++    await page.getByRole('button', { name: 'Delete (3 assets)' }).click();
++    await expect(page.getByText('Unable to resolve selected stack members', { exact: true })).toBeVisible();
++    expect(deleteRequests).toBe(0);
++    await expect.poll(() => getTrashStates(admin.accessToken, fixture.rawStack)).toEqual([false, false, false]);
++
++    await page.keyboard.press('x');
++    await expect(page.getByText('Unable to resolve selected stack members', { exact: true }).first()).toBeVisible();
++    await expect(viewerSelection(page).getByText(/selected$/)).toHaveCount(0);
++  });
++});
+diff --git a/i18n/en.json b/i18n/en.json
+index f6e328966..63d99fc50 100644
+--- a/i18n/en.json
++++ b/i18n/en.json
+@@ -884,6 +884,7 @@
+   "deleted_shared_link": "Deleted shared link",
+   "description": "Description",
+   "deselect_all": "Deselect All",
++  "deselect_asset": "Deselect asset",
+   "details": "Details",
+   "direction": "Direction",
+   "disable": "Disable",
+@@ -1669,6 +1670,7 @@
+   "permanently_delete": "Permanently delete",
+   "permanently_delete_assets_count": "Permanently delete {count, plural, one {asset} other {assets}}",
+   "permanently_delete_assets_prompt": "Are you sure you want to permanently delete {count, plural, one {this asset?} other {these <b>#</b> assets?}} This will also remove {count, plural, one {it from its} other {them from their}} album(s).",
++  "permanently_delete_count": "Permanently delete {count, number}",
+   "permanently_deleted_asset": "Permanently deleted asset",
+   "permanently_deleted_assets_count": "Permanently deleted {count, plural, one {# asset} other {# assets}}",
+   "permission": "Permission",
+@@ -1948,6 +1950,7 @@
+   "select_albums": "Select albums",
+   "select_all": "Select all",
+   "select_all_duplicates": "Select all duplicates",
++  "select_asset": "Select asset",
+   "select_avatar_color": "Select avatar color",
+   "select_count": "{count, plural, one {Select #} other {Select #}}",
+   "select_cutoff_date": "Select cutoff date",
+@@ -1967,6 +1970,7 @@
+   "selected_count": "{count, plural, other {# selected}}",
+   "selected_gps_coordinates": "Selected GPS Coordinates",
+   "selected_stack_members_included": "{count, plural, one {# hidden stack member included} other {# hidden stack members included}}",
++  "selection_actions": "Selection actions",
+   "send_message": "Send message",
+   "send_welcome_email": "Send welcome email",
+   "server_endpoint": "Server Endpoint",
+@@ -2227,6 +2231,7 @@
+   "trash_count": "Trash {count, number}",
+   "trash_delete_asset": "Trash/Delete Asset",
+   "trash_no_results_message": "Trashed photos and videos will show up here.",
++  "trash_or_delete_selected_assets": "Trash or delete the selected assets",
+   "trash_page_delete_all": "Delete All",
+   "trash_page_info": "Trashed items will be permanently deleted after {days} days",
+   "trashed_items_will_be_permanently_deleted_after": "Trashed items will be permanently deleted after {days, plural, one {# day} other {# days}}.",
+@@ -2364,6 +2369,7 @@
+   "whats_new_settings_subtitle": "See what's new in Immich",
+   "whats_new_version": "Version {version}",
+   "when": "When",
++  "whole_stack_action": "{action} ({count, plural, one {# asset} other {# assets}})",
+   "whole_stack_selection_action_unavailable": "Unavailable while selecting whole stacks",
+   "width": "Width",
+   "wifi_name": "Wi-Fi Name",
+diff --git a/web/src/lib/components/asset-viewer/AssetViewer.svelte b/web/src/lib/components/asset-viewer/AssetViewer.svelte
+index 4873b0b41..5647284fe 100644
+--- a/web/src/lib/components/asset-viewer/AssetViewer.svelte
++++ b/web/src/lib/components/asset-viewer/AssetViewer.svelte
+@@ -2,7 +2,12 @@
+   import { browser } from '$app/environment';
+   import { focusTrap } from '$lib/actions/focus-trap';
+   import { shortcuts } from '$lib/actions/shortcut';
+-  import type { Action, OnAction, PreAction } from '$lib/components/asset-viewer/actions/action';
++  import {
++    getActionAssetIds,
++    type Action,
++    type OnAction,
++    type PreAction,
++  } from '$lib/components/asset-viewer/actions/action';
+   import NextAssetAction from '$lib/components/asset-viewer/actions/NextAssetAction.svelte';
+   import PreviousAssetAction from '$lib/components/asset-viewer/actions/PreviousAssetAction.svelte';
+   import AssetViewerNavBar from '$lib/components/asset-viewer/AssetViewerNavBar.svelte';
+@@ -38,7 +43,7 @@
+     type StackResponseDto,
+   } from '@immich/sdk';
+   import { CommandPaletteDefaultProvider } from '@immich/ui';
+-  import { onDestroy, onMount, untrack } from 'svelte';
++  import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
+   import type { SwipeCustomEvent } from 'svelte-gestures';
+   import { t } from 'svelte-i18n';
+   import { fly } from 'svelte/transition';
+@@ -74,6 +79,10 @@
+     onUndoDelete?: OnUndoDelete;
+     onClose?: (assetId: string) => void;
+     onRandom?: () => Promise<{ id: string } | undefined>;
++    /** Lets the viewer mark assets in the shared multi-select selection. */
++    selectable?: boolean;
++    /** Host-specific actions on the marked assets, shown in the viewer's selection menu. */
++    selectionActions?: Snippet;
+   }
+ 
+   let {
+@@ -89,6 +98,8 @@
+     onUndoDelete,
+     onClose,
+     onRandom,
++    selectable = false,
++    selectionActions,
+   }: Props = $props();
+ 
+   const {
+@@ -357,7 +368,7 @@
+     switch (action.type) {
+       case AssetAction.DELETE:
+       case AssetAction.TRASH: {
+-        eventManager.emit('AssetsDelete', [asset.id]);
++        eventManager.emit('AssetsDelete', getActionAssetIds(action) ?? [asset.id]);
+         break;
+       }
+       case AssetAction.RATING: {
+@@ -529,6 +540,8 @@
+         onClose={onClose ? () => onClose(stack?.primaryAssetId ?? asset.id) : undefined}
+         {isPlayingOriginalVideo}
+         {setPlayOriginalVideo}
++        {selectable}
++        {selectionActions}
+       />
+     </div>
+   {/if}
+diff --git a/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte b/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte
+index 4f6bfcb3b..2ded0dfbb 100644
+--- a/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte
++++ b/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte
+@@ -5,6 +5,7 @@
+   import DeleteAction from '$lib/components/asset-viewer/actions/DeleteAction.svelte';
+   import RestoreAction from '$lib/components/asset-viewer/actions/RestoreAction.svelte';
+   import SetVisibilityAction from '$lib/components/asset-viewer/actions/SetVisibilityAction.svelte';
++  import ViewerSelectionControls from '$lib/components/asset-viewer/ViewerSelectionControls.svelte';
+   import LoadingDots from '$lib/components/LoadingDots.svelte';
+   import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
+   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
+@@ -28,6 +29,7 @@
+   } from '@immich/sdk';
+   import { ActionButton, CommandPaletteDefaultProvider, Tooltip, type ActionItem } from '@immich/ui';
+   import { mdiArrowLeft, mdiArrowRight, mdiDotsVertical, mdiVideoOutline } from '@mdi/js';
++  import type { Snippet } from 'svelte';
+   import { t } from 'svelte-i18n';
+ 
+   interface Props {
+@@ -41,6 +43,8 @@
+     onClose?: () => void;
+     isPlayingOriginalVideo: boolean;
+     setPlayOriginalVideo: (value: boolean) => void;
++    selectable?: boolean;
++    selectionActions?: Snippet;
+   }
+ 
+   let {
+@@ -54,6 +58,8 @@
+     onClose,
+     isPlayingOriginalVideo = false,
+     setPlayOriginalVideo,
++    selectable = false,
++    selectionActions,
+   }: Props = $props();
+ 
+   const isOwner = $derived(authManager.authenticated && asset.ownerId === authManager.user.id);
+@@ -79,6 +85,7 @@
+   const Actions = $derived(getAssetActions($t, { ...asset, stackPrimaryAssetId: stack?.primaryAssetId }, album));
+   const StackActions = $derived(getStackActions($t, stack, asset));
+   const sharedLink = getSharedLink();
++  const showSelectionControls = $derived(selectable && authManager.authenticated && !sharedLink);
+ </script>
+ 
+ <CommandPaletteDefaultProvider name={$t('assets')} actions={withoutIcons([Close, Cast, ...Object.values(Actions)])} />
+@@ -86,8 +93,11 @@
+ <div
+   class="flex h-16 place-items-center justify-between bg-linear-to-b from-black/40 px-3 drop-shadow-[0_0_1px_rgba(0,0,0,0.4)] transition-transform duration-200"
+ >
+-  <div class="dark">
++  <div class="dark flex items-center gap-1">
+     <ActionButton action={Close} />
++    {#if showSelectionControls}
++      <ViewerSelectionControls {asset} {album} {preAction} {onAction} {onUndoDelete} {selectionActions} />
++    {/if}
+   </div>
+ 
+   <div
+diff --git a/web/src/lib/components/asset-viewer/ViewerSelectionControls.svelte b/web/src/lib/components/asset-viewer/ViewerSelectionControls.svelte
+new file mode 100644
+index 000000000..7ef3c3a48
+--- /dev/null
++++ b/web/src/lib/components/asset-viewer/ViewerSelectionControls.svelte
+@@ -0,0 +1,199 @@
++<script lang="ts">
++  import { shortcuts } from '$lib/actions/shortcut';
++  import ActionMenuItem from '$lib/components/ActionMenuItem.svelte';
++  import type { OnAction, PreAction } from '$lib/components/asset-viewer/actions/action';
++  import ButtonContextMenu from '$lib/components/shared-components/context-menu/ButtonContextMenu.svelte';
++  import MenuOption from '$lib/components/shared-components/context-menu/MenuOption.svelte';
++  import { AssetAction } from '$lib/constants';
++  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
++  import { authManager } from '$lib/managers/auth-manager.svelte';
++  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
++  import AssetDeleteConfirmModal from '$lib/modals/AssetDeleteConfirmModal.svelte';
++  import { getAssetBulkActions, handleDownloadAsset } from '$lib/services/asset.service';
++  import { showDeleteModal } from '$lib/stores/preferences.store';
++  import { deleteAssets, type OnUndoDelete } from '$lib/utils/actions';
++  import { downloadArchive } from '$lib/utils/asset-utils';
++  import { toTimelineAsset } from '$lib/utils/timeline-util';
++  import { getAssetInfo, type AlbumResponseDto, type AssetResponseDto } from '@immich/sdk';
++  import { IconButton, modalManager, Switch, toastManager } from '@immich/ui';
++  import {
++    mdiCheckboxBlankCircleOutline,
++    mdiCheckCircle,
++    mdiClose,
++    mdiDeleteForeverOutline,
++    mdiDeleteOutline,
++    mdiDotsVertical,
++    mdiDownload,
++  } from '@mdi/js';
++  import type { Snippet } from 'svelte';
++  import { t } from 'svelte-i18n';
++
++  interface Props {
++    asset: AssetResponseDto;
++    album?: AlbumResponseDto;
++    preAction: PreAction;
++    onAction: OnAction;
++    onUndoDelete?: OnUndoDelete;
++    selectionActions?: Snippet;
++  }
++
++  let { asset, album, preAction, onAction, onUndoDelete, selectionActions }: Props = $props();
++
++  const isMarked = $derived(assetMultiSelectManager.hasSelectedAsset(asset.id));
++  const selectionActive = $derived(assetMultiSelectManager.selectionActive);
++  const selectedCount = $derived(assetMultiSelectManager.assets.length);
++  const implicitAssetCount = $derived(assetMultiSelectManager.implicitAssetCount);
++  const forceDelete = $derived(
++    !featureFlagsManager.value.trash || assetMultiSelectManager.assets.some((selected) => selected.isTrashed),
++  );
++  const BulkActions = $derived(getAssetBulkActions($t, album));
++
++  const showStackError = () => toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
++
++  const toggleMark = async () => {
++    const timelineAsset = toTimelineAsset(asset);
++    if (isMarked) {
++      assetMultiSelectManager.removeAssetWithStack(timelineAsset);
++      return;
++    }
++    if (!(await assetMultiSelectManager.addAssetWithStack(timelineAsset))) {
++      showStackError();
++    }
++  };
++
++  const toggleWholeStack = async (checked: boolean) => {
++    if (!(await assetMultiSelectManager.setSelectWholeStack(checked))) {
++      showStackError();
++    }
++  };
++
++  const trashOrDeleteSelected = async (forceRequest?: boolean) => {
++    if (!selectionActive) {
++      return;
++    }
++    const assets = await assetMultiSelectManager.getAssetsForAction();
++    if (!assets) {
++      showStackError();
++      return;
++    }
++
++    const force = forceRequest || !featureFlagsManager.value.trash || assets.some((selected) => selected.isTrashed);
++    if (force && $showDeleteModal) {
++      const confirmed = await modalManager.show(AssetDeleteConfirmModal, { size: assets.length });
++      if (!confirmed) {
++        return;
++      }
++    }
++
++    const timelineAsset = toTimelineAsset(asset);
++    const assetIds = assets.map(({ id }) => id);
++    const type = force ? AssetAction.DELETE : AssetAction.TRASH;
++    preAction({ type, asset: timelineAsset, assetIds });
++    await deleteAssets(
++      force,
++      () => {
++        onAction({ type, asset: timelineAsset, assetIds });
++        assetMultiSelectManager.clear();
++      },
++      assets,
++      onUndoDelete,
++    );
++  };
++
++  const downloadSelected = async () => {
++    const assets = await assetMultiSelectManager.getAssetsForAction();
++    if (!assets) {
++      showStackError();
++      return;
++    }
++    assetMultiSelectManager.clear();
++    if (assets.length === 1) {
++      await handleDownloadAsset(await getAssetInfo({ ...authManager.params, id: assets[0].id }), { edited: true });
++      return;
++    }
++    await downloadArchive('immich', { assetIds: assets.map(({ id }) => id) });
++  };
++</script>
++
++<svelte:document
++  use:shortcuts={[
++    { shortcut: { key: 'x' }, onShortcut: () => toggleMark() },
++    {
++      shortcut: { key: 's', shift: true },
++      onShortcut: () => toggleWholeStack(!assetMultiSelectManager.selectWholeStack),
++    },
++    ...(selectionActive
++      ? [
++          { shortcut: { key: 'd', ctrl: true }, onShortcut: () => assetMultiSelectManager.clear() },
++          { shortcut: { key: 'Delete', ctrl: true }, onShortcut: () => trashOrDeleteSelected() },
++          { shortcut: { key: 'Delete', ctrl: true, shift: true }, onShortcut: () => trashOrDeleteSelected(true) },
++        ]
++      : []),
++  ]}
++/>
++
++<div class="flex items-center gap-1 text-white" data-testid="asset-viewer-selection">
++  <IconButton
++    color="secondary"
++    shape="round"
++    variant="ghost"
++    icon={isMarked ? mdiCheckCircle : mdiCheckboxBlankCircleOutline}
++    aria-label={isMarked ? $t('deselect_asset') : $t('select_asset')}
++    aria-pressed={isMarked}
++    onclick={() => toggleMark()}
++  />
++
++  {#if selectionActive}
++    <div class="flex flex-col px-1 text-sm/tight" role="status">
++      <span class="font-medium">{$t('selected_count', { values: { count: selectedCount } })}</span>
++      {#if implicitAssetCount > 0}
++        <span class="hidden text-xs text-white/70 sm:block">
++          {$t('selected_stack_members_included', { values: { count: implicitAssetCount } })}
++        </span>
++      {/if}
++    </div>
++    <IconButton
++      color="secondary"
++      shape="round"
++      variant="ghost"
++      icon={mdiClose}
++      aria-label={$t('deselect_all')}
++      onclick={() => assetMultiSelectManager.clear()}
++    />
++    <IconButton
++      color="secondary"
++      shape="round"
++      variant="ghost"
++      icon={forceDelete ? mdiDeleteForeverOutline : mdiDeleteOutline}
++      aria-label={forceDelete
++        ? $t('permanently_delete_count', { values: { count: selectedCount } })
++        : $t('trash_count', { values: { count: selectedCount } })}
++      onclick={() => trashOrDeleteSelected()}
++    />
++    <ButtonContextMenu
++      direction="right"
++      align="top-left"
++      color="secondary"
++      title={$t('selection_actions')}
++      icon={mdiDotsVertical}
++    >
++      <MenuOption text={$t('download')} icon={mdiDownload} onClick={() => downloadSelected()} />
++      <ActionMenuItem action={BulkActions.AddToAlbum} />
++      <ActionMenuItem action={BulkActions.RemoveFromAlbum} />
++      <ActionMenuItem action={BulkActions.CreateSharedLink} />
++      <ActionMenuItem action={BulkActions.Tag} />
++      {@render selectionActions?.()}
++    </ButtonContextMenu>
++  {/if}
++
++  {#if selectionActive || asset.stack}
++    <label class="ms-1 flex items-center gap-2 text-xs sm:text-sm">
++      <span class="hidden sm:inline">{$t('select_whole_stack')}</span>
++      <Switch
++        aria-label={$t('select_whole_stack')}
++        checked={assetMultiSelectManager.selectWholeStack}
++        onCheckedChange={toggleWholeStack}
++      />
++    </label>
++  {/if}
++</div>
+diff --git a/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte b/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte
+index d60ae5815..21edbf416 100644
+--- a/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte
++++ b/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte
+@@ -3,9 +3,13 @@
+   import type { OnAction, PreAction } from '$lib/components/asset-viewer/actions/action';
+   import MenuOption from '$lib/components/shared-components/context-menu/MenuOption.svelte';
+   import { AssetAction } from '$lib/constants';
+-  import { toggleArchive } from '$lib/utils/asset-utils';
++  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
++  import { authManager } from '$lib/managers/auth-manager.svelte';
++  import { eventManager } from '$lib/managers/event-manager.svelte';
++  import { archiveAssets, toggleArchive } from '$lib/utils/asset-utils';
+   import { toTimelineAsset } from '$lib/utils/timeline-util';
+-  import type { AssetResponseDto } from '@immich/sdk';
++  import { AssetVisibility, getAssetInfo, type AssetResponseDto } from '@immich/sdk';
++  import { toastManager } from '@immich/ui';
+   import { mdiArchiveArrowDownOutline, mdiArchiveArrowUpOutline } from '@mdi/js';
+   import { t } from 'svelte-i18n';
+ 
+@@ -17,7 +21,38 @@
+ 
+   let { asset, onAction, preAction }: Props = $props();
+ 
++  const stackCount = $derived(
++    assetMultiSelectManager.selectWholeStack && asset.stack ? asset.stack.assetCount : undefined,
++  );
++  const text = $derived.by(() => {
++    const action = asset.isArchived ? $t('unarchive') : $t('to_archive');
++    return stackCount ? $t('whole_stack_action', { values: { action, count: stackCount } }) : action;
++  });
++
++  const onArchiveStack = async () => {
++    const assets = await assetMultiSelectManager.getStackAssetsForAction(toTimelineAsset(asset));
++    if (!assets) {
++      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
++      return;
++    }
++
++    const timelineAsset = toTimelineAsset(asset);
++    const assetIds = assets.map(({ id }) => id);
++    const type = asset.isArchived ? AssetAction.UNARCHIVE : AssetAction.ARCHIVE;
++    if (type === AssetAction.ARCHIVE) {
++      preAction({ type, asset: timelineAsset, assetIds });
++    }
++    await archiveAssets(assets, asset.isArchived ? AssetVisibility.Timeline : AssetVisibility.Archive);
++    const updatedAsset = await getAssetInfo({ ...authManager.params, id: asset.id });
++    eventManager.emit('AssetUpdate', updatedAsset);
++    onAction({ type, asset: toTimelineAsset(updatedAsset), assetIds });
++  };
++
+   const onArchive = async () => {
++    if (stackCount) {
++      return onArchiveStack();
++    }
++
+     if (!asset.isArchived) {
+       preAction({ type: AssetAction.ARCHIVE, asset: toTimelineAsset(asset) });
+     }
+@@ -32,6 +67,6 @@
+ 
+ <MenuOption
+   icon={asset.isArchived ? mdiArchiveArrowUpOutline : mdiArchiveArrowDownOutline}
+-  text={asset.isArchived ? $t('unarchive') : $t('to_archive')}
++  {text}
+   onClick={onArchive}
+ />
+diff --git a/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
+index d715540d3..8ca732ce7 100644
+--- a/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
++++ b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
+@@ -1,9 +1,17 @@
+ import type { AssetResponseDto } from '@immich/sdk';
+ import '@testing-library/jest-dom';
++import { fireEvent } from '@testing-library/svelte';
++import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
++import { deleteAssets } from '$lib/utils/actions';
+ import { renderWithTooltips } from '$tests/helpers';
+-import { assetFactory } from '@test-data/factories/asset-factory';
++import { assetFactory, timelineAssetFactory } from '@test-data/factories/asset-factory';
+ import DeleteAction from './DeleteAction.svelte';
+ 
++vi.mock(import('$lib/utils/actions'), async (importOriginal) => ({
++  ...(await importOriginal()),
++  deleteAssets: vi.fn(),
++}));
++
+ vi.mock(import('$lib/managers/feature-flags-manager.svelte'), () => {
+   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   return { featureFlagsManager: { init: vi.fn(), loadFeatureFlags: vi.fn(), value: { trash: true } } as any };
+@@ -43,4 +51,51 @@ describe('DeleteAction component', () => {
+       expect(queryByTitle('delete')).toBeNull();
+     });
+   });
++
++  describe('with whole-stack selection on', () => {
++    const stackRef = { id: 'raw-stack', assetCount: 3, primaryAssetId: 'raw' };
++
++    beforeEach(() => {
++      vi.clearAllMocks();
++      asset = assetFactory.build({ isTrashed: false, stack: stackRef });
++      assetMultiSelectManager.selectWholeStack = true;
++    });
++
++    afterEach(() => {
++      assetMultiSelectManager.reset();
++      vi.restoreAllMocks();
++    });
++
++    it('names the number of assets the button affects', () => {
++      const { getByLabelText } = renderWithTooltips(DeleteAction, { asset, onAction: vi.fn(), preAction: vi.fn() });
++      expect(getByLabelText('whole_stack_action')).toBeInTheDocument();
++    });
++
++    it('trashes every refreshed stack member and reports all IDs to the host', async () => {
++      const members = timelineAssetFactory.buildList(3);
++      vi.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(members);
++      const preAction = vi.fn();
++      const { getByLabelText } = renderWithTooltips(DeleteAction, { asset, onAction: vi.fn(), preAction });
++
++      await fireEvent.click(getByLabelText('whole_stack_action'));
++
++      const assetIds = members.map(({ id }) => id);
++      await vi.waitFor(() => expect(deleteAssets).toHaveBeenCalled());
++      expect(vi.mocked(deleteAssets).mock.calls[0][0]).toBe(false);
++      expect(vi.mocked(deleteAssets).mock.calls[0][2]).toEqual(members);
++      expect(preAction).toHaveBeenCalledWith(expect.objectContaining({ type: 'trash', assetIds }));
++    });
++
++    it('deletes nothing when the stack lookup fails', async () => {
++      vi.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(undefined);
++      const preAction = vi.fn();
++      const { getByLabelText } = renderWithTooltips(DeleteAction, { asset, onAction: vi.fn(), preAction });
++
++      await fireEvent.click(getByLabelText('whole_stack_action'));
++
++      await vi.waitFor(() => expect(assetMultiSelectManager.getStackAssetsForAction).toHaveBeenCalled());
++      expect(deleteAssets).not.toHaveBeenCalled();
++      expect(preAction).not.toHaveBeenCalled();
++    });
++  });
+ });
+diff --git a/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte b/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte
+index 60cf59a7c..51cbe7c52 100644
+--- a/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte
++++ b/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte
+@@ -1,6 +1,7 @@
+ <script lang="ts">
+   import { shortcuts } from '$lib/actions/shortcut';
+   import { AssetAction } from '$lib/constants';
++  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
+   import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
+   import AssetDeleteConfirmModal from '$lib/modals/AssetDeleteConfirmModal.svelte';
+   import { showDeleteModal } from '$lib/stores/preferences.store';
+@@ -23,8 +24,41 @@
+   let { asset, onAction, preAction, onUndoDelete = undefined }: Props = $props();
+ 
+   const forceDefault = $derived(asset.isTrashed || !featureFlagsManager.value.trash);
++  const stackCount = $derived(
++    assetMultiSelectManager.selectWholeStack && asset.stack ? asset.stack.assetCount : undefined,
++  );
++  const label = $derived.by(() => {
++    const action = forceDefault ? $t('permanently_delete') : $t('delete');
++    return stackCount ? $t('whole_stack_action', { values: { action, count: stackCount } }) : action;
++  });
++
++  const trashOrDeleteStack = async (forceRequest?: boolean) => {
++    const assets = await assetMultiSelectManager.getStackAssetsForAction(toTimelineAsset(asset));
++    if (!assets) {
++      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
++      return;
++    }
++
++    const force = forceDefault || forceRequest || assets.some((member) => member.isTrashed);
++    if (force && $showDeleteModal) {
++      const confirmed = await modalManager.show(AssetDeleteConfirmModal, { size: assets.length });
++      if (!confirmed) {
++        return;
++      }
++    }
++
++    const timelineAsset = toTimelineAsset(asset);
++    const assetIds = assets.map(({ id }) => id);
++    const type = force ? AssetAction.DELETE : AssetAction.TRASH;
++    preAction({ type, asset: timelineAsset, assetIds });
++    await deleteAssetsUtil(force, () => onAction({ type, asset: timelineAsset, assetIds }), assets, onUndoDelete);
++  };
+ 
+   const trashOrDelete = async (forceRequest?: boolean) => {
++    if (stackCount) {
++      return trashOrDeleteStack(forceRequest);
++    }
++
+     const timelineAsset = toTimelineAsset(asset);
+     const force = forceDefault || forceRequest;
+ 
+@@ -70,6 +104,6 @@
+   shape="round"
+   variant="ghost"
+   icon={forceDefault ? mdiDeleteForeverOutline : mdiDeleteOutline}
+-  aria-label={forceDefault ? $t('permanently_delete') : $t('delete')}
++  aria-label={label}
+   onclick={() => trashOrDelete()}
+ />
+diff --git a/web/src/lib/components/asset-viewer/actions/action.ts b/web/src/lib/components/asset-viewer/actions/action.ts
+index c02fadf81..d11299cc2 100644
+--- a/web/src/lib/components/asset-viewer/actions/action.ts
++++ b/web/src/lib/components/asset-viewer/actions/action.ts
+@@ -1,11 +1,14 @@
+ import type { AssetAction } from '$lib/constants';
+ import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
+ 
++/** Every asset an action removed from view, when it affected more than the asset on screen. */
++type MultiAssetAction = { asset: TimelineAsset; assetIds?: string[] };
++
+ type ActionMap = {
+-  [AssetAction.ARCHIVE]: { asset: TimelineAsset };
+-  [AssetAction.UNARCHIVE]: { asset: TimelineAsset };
+-  [AssetAction.TRASH]: { asset: TimelineAsset };
+-  [AssetAction.DELETE]: { asset: TimelineAsset };
++  [AssetAction.ARCHIVE]: MultiAssetAction;
++  [AssetAction.UNARCHIVE]: MultiAssetAction;
++  [AssetAction.TRASH]: MultiAssetAction;
++  [AssetAction.DELETE]: MultiAssetAction;
+   [AssetAction.RESTORE]: { asset: TimelineAsset };
+   [AssetAction.SET_VISIBILITY_LOCKED]: { asset: TimelineAsset };
+   [AssetAction.SET_VISIBILITY_TIMELINE]: { asset: TimelineAsset };
+@@ -17,3 +20,6 @@ export type Action = {
+ }[AssetAction];
+ export type OnAction = (action: Action) => void;
+ export type PreAction = (action: Action) => void;
++
++export const getActionAssetIds = (action: Action) =>
++  'assetIds' in action && action.assetIds ? action.assetIds : undefined;
+diff --git a/web/src/lib/components/shared-components/gallery-viewer/GalleryViewer.svelte b/web/src/lib/components/shared-components/gallery-viewer/GalleryViewer.svelte
+index 3ac2eee27..671c60af1 100644
+--- a/web/src/lib/components/shared-components/gallery-viewer/GalleryViewer.svelte
++++ b/web/src/lib/components/shared-components/gallery-viewer/GalleryViewer.svelte
+@@ -1,12 +1,17 @@
+ <script lang="ts">
+   import { goto } from '$app/navigation';
+   import { shortcuts, type ShortcutOptions } from '$lib/actions/shortcut';
+-  import type { Action } from '$lib/components/asset-viewer/actions/action';
++  import { getActionAssetIds, type Action } from '$lib/components/asset-viewer/actions/action';
+   import type { AssetCursor } from '$lib/components/asset-viewer/AssetViewer.svelte';
+   import Thumbnail from '$lib/components/assets/thumbnail/Thumbnail.svelte';
++  import ArchiveAction from '$lib/components/timeline/actions/ArchiveAction.svelte';
++  import FavoriteAction from '$lib/components/timeline/actions/FavoriteAction.svelte';
+   import { AssetAction } from '$lib/constants';
+   import Portal from '$lib/elements/Portal.svelte';
+-  import type { AssetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
++  import {
++    assetMultiSelectManager,
++    type AssetMultiSelectManager,
++  } from '$lib/managers/asset-multi-select-manager.svelte';
+   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
+   import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
+   import type { TimelineAsset, Viewport } from '$lib/managers/timeline-manager/types';
+@@ -292,11 +297,38 @@
+     }
+   };
+ 
++  const removeAssetsFromView = async (assetIds: string[]) => {
++    const removedIds = new Set(assetIds);
++    const index = assets.findIndex((asset) => asset.id === assetCursor.current.id);
++    const currentRemoved = removedIds.has(assetCursor.current.id);
++    const replacement = currentRemoved
++      ? (assets.slice(index + 1).find((asset) => !removedIds.has(asset.id)) ??
++        assets.slice(0, Math.max(index, 0)).findLast((asset) => !removedIds.has(asset.id)))
++      : undefined;
++
++    assets = assets.filter((asset) => !removedIds.has(asset.id));
++
++    if (!currentRemoved) {
++      return;
++    }
++    if (assets.length === 0) {
++      await goto(Route.photos());
++      return;
++    }
++    await navigateToAsset(replacement);
++  };
++
+   const handleAction = async (action: Action) => {
+     switch (action.type) {
+       case AssetAction.ARCHIVE:
+       case AssetAction.DELETE:
+       case AssetAction.TRASH: {
++        const assetIds = getActionAssetIds(action);
++        if (assetIds) {
++          await removeAssetsFromView(assetIds);
++          break;
++        }
++
+         const nextAsset = assetCursor.nextAsset ?? assetCursor.previousAsset;
+         assets.splice(
+           assets.findIndex((currentAsset) => currentAsset.id === action.asset.id),
+@@ -402,7 +434,25 @@
+           assetViewerManager.showAssetViewer(false);
+           handlePromiseError(navigate({ targetRoute: 'current', assetId: null }));
+         }}
+-      />
++        selectable={assetInteraction === assetMultiSelectManager}
++      >
++        {#snippet selectionActions()}
++          <FavoriteAction
++            menuItem
++            removeFavorite={assetInteraction.isAllFavorite}
++            onFavorite={(ids, isFavorite) => {
++              for (const asset of assets) {
++                if (ids.includes(asset.id)) {
++                  asset.isFavorite = isFavorite;
++                }
++              }
++            }}
++          />
++          {#if assetInteraction.isAllUserOwned}
++            <ArchiveAction menuItem unarchive={assetInteraction.isAllArchived} />
++          {/if}
++        {/snippet}
++      </AssetViewer>
+     {/await}
+   </Portal>
+ {/if}
+diff --git a/web/src/lib/components/timeline/Timeline.svelte b/web/src/lib/components/timeline/Timeline.svelte
+index a9a5e1bb9..d912a94ac 100644
+--- a/web/src/lib/components/timeline/Timeline.svelte
++++ b/web/src/lib/components/timeline/Timeline.svelte
+@@ -11,7 +11,10 @@
+   import HotModuleReload from '$lib/elements/HotModuleReload.svelte';
+   import Portal from '$lib/elements/Portal.svelte';
+   import Skeleton from '$lib/elements/Skeleton.svelte';
+-  import type { AssetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
++  import {
++    assetMultiSelectManager,
++    type AssetMultiSelectManager,
++  } from '$lib/managers/asset-multi-select-manager.svelte';
+   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
+   import type { TimelineDay } from '$lib/managers/timeline-manager/timeline-day.svelte';
+   import { isIntersecting } from '$lib/managers/timeline-manager/internal/intersection-support.svelte';
+@@ -705,7 +708,16 @@
+ 
+ <Portal target="body">
+   {#if assetViewerManager.isViewing}
+-    <TimelineAssetViewer bind:invisible {timelineManager} {removeAction} {withStacked} {isShared} {album} {person} />
++    <TimelineAssetViewer
++      bind:invisible
++      {timelineManager}
++      {removeAction}
++      {withStacked}
++      {isShared}
++      {album}
++      {person}
++      selectable={assetInteraction === assetMultiSelectManager && !isSelectionMode && !singleSelect}
++    />
+   {/if}
+ </Portal>
+ 
+diff --git a/web/src/lib/components/timeline/TimelineAssetViewer.svelte b/web/src/lib/components/timeline/TimelineAssetViewer.svelte
+index 373ecef24..c8afe2e58 100644
+--- a/web/src/lib/components/timeline/TimelineAssetViewer.svelte
++++ b/web/src/lib/components/timeline/TimelineAssetViewer.svelte
+@@ -1,10 +1,13 @@
+ <script lang="ts">
+-  import type { Action } from '$lib/components/asset-viewer/actions/action';
++  import { getActionAssetIds, type Action } from '$lib/components/asset-viewer/actions/action';
+   import type { AssetCursor } from '$lib/components/asset-viewer/AssetViewer.svelte';
+   import OnEvents from '$lib/components/OnEvents.svelte';
++  import ArchiveAction from '$lib/components/timeline/actions/ArchiveAction.svelte';
++  import FavoriteAction from '$lib/components/timeline/actions/FavoriteAction.svelte';
+   import { AssetAction } from '$lib/constants';
+   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
+   import { assetCacheManager } from '$lib/managers/AssetCacheManager.svelte';
++  import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
+   import { authManager } from '$lib/managers/auth-manager.svelte';
+   import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
+   import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
+@@ -26,6 +29,7 @@
+     album?: AlbumResponseDto;
+     person?: PersonResponseDto;
+     removeAction?: AssetAction.UNARCHIVE | AssetAction.ARCHIVE | AssetAction.SET_VISIBILITY_TIMELINE | null;
++    selectable?: boolean;
+   }
+ 
+   let {
+@@ -37,6 +41,7 @@
+     isShared = false,
+     album,
+     person,
++    selectable = false,
+   }: Props = $props();
+ 
+   const getAsset = (id: string) => {
+@@ -115,6 +120,33 @@
+     }
+   };
+ 
++  const findRemainingAsset = async (removedIds: Set<string>, direction: 'earlier' | 'later') => {
++    const step = (asset: { id: string }) =>
++      direction === 'earlier' ? timelineManager.getEarlierAsset(asset) : timelineManager.getLaterAsset(asset);
++    let candidate = await step(assetCursor.current);
++    while (candidate && removedIds.has(candidate.id)) {
++      candidate = await step(candidate);
++    }
++    return candidate;
++  };
++
++  const removeAssetsFromView = async (assetIds: string[]) => {
++    const removedIds = new Set(assetIds);
++    const current = assetCursor.current;
++    if (!removedIds.has(current.id)) {
++      timelineManager.removeAssets(assetIds);
++      return;
++    }
++
++    const remaining =
++      (await findRemainingAsset(removedIds, 'earlier')) ?? (await findRemainingAsset(removedIds, 'later'));
++    timelineManager.removeAssets(assetIds);
++    const replacement = remaining ? await getAsset(remaining.id) : undefined;
++    if (!(await navigateToAsset(replacement))) {
++      await handleClose(current.id);
++    }
++  };
++
+   const handlePreAction = async (action: Action) => {
+     switch (action.type) {
+       case removeAction:
+@@ -124,6 +156,12 @@
+       case AssetAction.ARCHIVE:
+       case AssetAction.SET_VISIBILITY_LOCKED:
+       case AssetAction.SET_VISIBILITY_TIMELINE: {
++        const assetIds = getActionAssetIds(action);
++        if (assetIds) {
++          await removeAssetsFromView(assetIds);
++          break;
++        }
++
+         // must update manager before performing any navigation
+         timelineManager.removeAssets([action.asset.id]);
+ 
+@@ -203,5 +241,21 @@
+     onUndoDelete={handleUndoDelete}
+     onRandom={handleRandom}
+     onClose={handleClose}
+-  />
++    {selectable}
++  >
++    {#snippet selectionActions()}
++      <FavoriteAction
++        menuItem
++        removeFavorite={assetMultiSelectManager.isAllFavorite}
++        onFavorite={(ids, isFavorite) => timelineManager.update(ids, (asset) => (asset.isFavorite = isFavorite))}
++      />
++      {#if assetMultiSelectManager.isAllUserOwned}
++        <ArchiveAction
++          menuItem
++          unarchive={assetMultiSelectManager.isAllArchived}
++          onArchive={(ids, visibility) => timelineManager.update(ids, (asset) => (asset.visibility = visibility))}
++        />
++      {/if}
++    {/snippet}
++  </AssetViewer>
+ {/await}
+diff --git a/web/src/lib/managers/asset-multi-select-manager.svelte.spec.ts b/web/src/lib/managers/asset-multi-select-manager.svelte.spec.ts
+index 7cf51416d..4f21c088c 100644
+--- a/web/src/lib/managers/asset-multi-select-manager.svelte.spec.ts
++++ b/web/src/lib/managers/asset-multi-select-manager.svelte.spec.ts
+@@ -1,6 +1,7 @@
+ import { AssetVisibility, getStack, type StackResponseDto } from '@immich/sdk';
+ import { AssetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
+ import { authManager } from '$lib/managers/auth-manager.svelte';
++import { eventManager } from '$lib/managers/event-manager.svelte';
+ import { assetFactory, timelineAssetFactory } from '@test-data/factories/asset-factory';
+ import { preferencesFactory } from '@test-data/factories/preferences-factory';
+ import { userAdminFactory } from '@test-data/factories/user-factory';
+@@ -362,4 +363,99 @@ describe('AssetMultiSelectManager', () => {
+     await expect(enableWholeStack).resolves.toBe(true);
+     expect(sut.selectWholeStack).toBe(true);
+   });
++
++  describe('selection shared with the asset viewer', () => {
++    const rawPrimaryStack = () => {
++      const [raw, jpeg, edit] = assetFactory.buildList(3);
++      return { stack: { id: 'raw-stack', primaryAssetId: raw.id, assets: [raw, jpeg, edit] }, raw, jpeg, edit };
++    };
++
++    it('keeps whole-stack mode when the selection is cleared and turns it off on reset', async () => {
++      await sut.setSelectWholeStack(true);
++      sut.selectAsset(timelineAssetFactory.build());
++
++      sut.clear();
++      expect(sut.selectionActive).toBe(false);
++      expect(sut.selectWholeStack).toBe(true);
++
++      sut.reset();
++      expect(sut.selectWholeStack).toBe(false);
++    });
++
++    it('resets whole-stack mode when the page changes', async () => {
++      const navigating = new AssetMultiSelectManager({ resetOnNavigate: true });
++      await navigating.setSelectWholeStack(true);
++      navigating.selectAsset(timelineAssetFactory.build());
++
++      eventManager.emit('AppNavigate');
++
++      expect(navigating.selectionActive).toBe(false);
++      expect(navigating.selectWholeStack).toBe(false);
++      navigating.destroy();
++    });
++
++    it('returns only the asset when whole-stack mode is off', async () => {
++      const asset = timelineAssetFactory.build({ stack: { id: 'raw-stack', assetCount: 3, primaryAssetId: 'raw' } });
++
++      await expect(sut.getStackAssetsForAction(asset)).resolves.toEqual([asset]);
++      expect(getStackMock).not.toHaveBeenCalled();
++    });
++
++    it('refreshes every member of a RAW-primary stack with more than two assets', async () => {
++      const { stack, raw, jpeg, edit } = rawPrimaryStack();
++      getStackMock.mockResolvedValue(stack);
++      await sut.setSelectWholeStack(true);
++      const asset = timelineAssetFactory.build({
++        id: jpeg.id,
++        stack: { id: stack.id, assetCount: 2, primaryAssetId: raw.id },
++      });
++
++      const assets = await sut.getStackAssetsForAction(asset);
++
++      expect(getStackMock).toHaveBeenCalledWith({ id: stack.id });
++      expect(assets?.map(({ id }) => id)).toEqual([raw.id, jpeg.id, edit.id]);
++    });
++
++    it('returns undefined instead of the single asset when the stack lookup fails', async () => {
++      await sut.setSelectWholeStack(true);
++      getStackMock.mockRejectedValue(new Error('lookup failed'));
++      const asset = timelineAssetFactory.build({ stack: { id: 'raw-stack', assetCount: 2, primaryAssetId: 'raw' } });
++
++      await expect(sut.getStackAssetsForAction(asset)).resolves.toBeUndefined();
++    });
++
++    it('returns the asset alone when the refreshed stack no longer contains it', async () => {
++      const { stack } = rawPrimaryStack();
++      getStackMock.mockResolvedValue(stack);
++      await sut.setSelectWholeStack(true);
++      const asset = timelineAssetFactory.build({ stack: { id: stack.id, assetCount: 3, primaryAssetId: 'raw' } });
++
++      await expect(sut.getStackAssetsForAction(asset)).resolves.toEqual([asset]);
++    });
++
++    it('unmarks a whole stack from any of its members', async () => {
++      const { stack, raw, jpeg } = rawPrimaryStack();
++      getStackMock.mockResolvedValue(stack);
++      const stackRef = { id: stack.id, assetCount: 3, primaryAssetId: raw.id };
++      const ordinary = timelineAssetFactory.build();
++      await sut.setSelectWholeStack(true);
++      await sut.addAssetsWithStacks([timelineAssetFactory.build({ id: raw.id, stack: stackRef }), ordinary]);
++      expect(sut.assets).toHaveLength(4);
++
++      sut.removeAssetWithStack(timelineAssetFactory.build({ id: jpeg.id, stack: stackRef }));
++
++      expect(sut.assets.map(({ id }) => id)).toEqual([ordinary.id]);
++    });
++
++    it('unmarks only the asset when whole-stack mode is off', () => {
++      const stackRef = { id: 'raw-stack', assetCount: 2, primaryAssetId: 'raw' };
++      const primary = timelineAssetFactory.build({ stack: stackRef });
++      const member = timelineAssetFactory.build({ stack: stackRef });
++      sut.selectAssets([primary, member]);
++
++      sut.removeAssetWithStack(member);
++
++      expect(sut.assets.map(({ id }) => id)).toEqual([primary.id]);
++    });
++  });
+ });
+diff --git a/web/src/lib/managers/asset-multi-select-manager.svelte.ts b/web/src/lib/managers/asset-multi-select-manager.svelte.ts
+index 75ca5c1f1..463e2a137 100644
+--- a/web/src/lib/managers/asset-multi-select-manager.svelte.ts
++++ b/web/src/lib/managers/asset-multi-select-manager.svelte.ts
+@@ -47,7 +47,7 @@ export class AssetMultiSelectManager {
+   constructor(options?: AssetMultiSelectOptions) {
+     const { resetOnNavigate = false } = options ?? {};
+     if (resetOnNavigate) {
+-      this.#unsubscribe = eventManager.on({ AppNavigate: () => this.clear() });
++      this.#unsubscribe = eventManager.on({ AppNavigate: () => this.reset() });
+     }
+   }
+ 
+@@ -127,6 +127,38 @@ export class AssetMultiSelectManager {
+     return this.addAssetsWithStacks([asset]);
+   }
+ 
++  /** Removes an asset and, in whole-stack mode, every explicitly selected member of its stack. */
++  removeAssetWithStack(asset: TimelineAsset) {
++    const stackId = this.selectWholeStack ? asset.stack?.id : undefined;
++    for (const selected of Array.from(this.#explicitMap.values())) {
++      if (selected.id === asset.id || (stackId && selected.stack?.id === stackId)) {
++        this.#explicitMap.delete(selected.id);
++      }
++    }
++    this.#invalidateStackMembers();
++    if (this.selectWholeStack) {
++      void this.#refreshStackMembers();
++    }
++  }
++
++  /**
++   * Returns the assets a single-asset action applies to: the asset alone, or in whole-stack mode its current stack
++   * members. Returns undefined when the stack lookup fails, so the action aborts instead of acting on one member.
++   */
++  async getStackAssetsForAction(asset: TimelineAsset): Promise<TimelineAsset[] | undefined> {
++    if (!this.selectWholeStack || !asset.stack) {
++      return [asset];
++    }
++
++    try {
++      const stack = await getStack({ id: asset.stack.id });
++      const members = stack.assets.map((member) => toTimelineAsset(member));
++      return members.some((member) => member.id === asset.id) ? members : [asset];
++    } catch {
++      return undefined;
++    }
++  }
++
+   async setSelectWholeStack(enabled: boolean) {
+     this.selectWholeStack = enabled;
+     this.#invalidateStackMembers();
+@@ -190,7 +222,6 @@ export class AssetMultiSelectManager {
+ 
+   clear() {
+     this.selectAll = false;
+-    this.selectWholeStack = false;
+ 
+     // Multi-selection
+     this.#explicitMap.clear();
+@@ -202,6 +233,12 @@ export class AssetMultiSelectManager {
+     this.startAsset = null;
+   }
+ 
++  /** Clears the selection and turns whole-stack selection off, as when leaving the page. */
++  reset() {
++    this.clear();
++    this.selectWholeStack = false;
++  }
++
+   async #refreshStackMembers() {
+     const generation = ++this.#stackResolutionGeneration;
+     const assets = Array.from(this.#explicitMap.values());
+diff --git a/web/src/lib/modals/ShortcutsModal.svelte b/web/src/lib/modals/ShortcutsModal.svelte
+index bfa551304..4b51a0044 100644
+--- a/web/src/lib/modals/ShortcutsModal.svelte
++++ b/web/src/lib/modals/ShortcutsModal.svelte
+@@ -30,6 +30,8 @@
+         { key: ['Y', 'y'], action: $t('previous_or_next_year') },
+         { key: ['g'], action: $t('navigate_to_time') },
+         { key: ['x'], action: $t('select') },
++        { key: ['Ctrl', 'd'], action: $t('deselect_all') },
++        { key: ['⇧', 's'], action: $t('select_whole_stack') },
+         { key: ['Esc'], action: $t('back_close_deselect') },
+         { key: ['Ctrl', 'k'], action: $t('search_your_photos') },
+         { key: ['Ctrl', '⇧', 'k'], action: $t('open_the_search_filters') },
+@@ -46,6 +48,7 @@
+         { key: ['⇧', 'd'], action: $t('download') },
+         { key: ['Space'], action: $t('play_or_pause_video') },
+         { key: ['Del'], action: $t('trash_delete_asset'), info: $t('shift_to_permanent_delete') },
++        { key: ['Ctrl', 'Del'], action: $t('trash_or_delete_selected_assets'), info: $t('shift_to_permanent_delete') },
+         ...(authManager.authenticated && authManager.preferences.ratings.enabled
+           ? [{ key: ['0-5'], action: $t('rate_asset'), info: $t('rate_asset_description') }]
+           : []),
+diff --git a/web/src/lib/services/asset.service.spec.ts b/web/src/lib/services/asset.service.spec.ts
+index f829e0fa3..2e261671f 100644
+--- a/web/src/lib/services/asset.service.spec.ts
++++ b/web/src/lib/services/asset.service.spec.ts
+@@ -1,4 +1,4 @@
+-import { getAssetInfo } from '@immich/sdk';
++import { getAssetInfo, updateAssets } from '@immich/sdk';
+ import { modalManager, toastManager } from '@immich/ui';
+ import { vitest } from 'vitest';
+ import { assetMultiSelectManager } from '$lib/managers/asset-multi-select-manager.svelte';
+@@ -143,4 +143,93 @@ describe('AssetService', () => {
+       expect(toastManager.primary).toHaveBeenCalledWith('formatter');
+     });
+   });
++
++  describe('getAssetActions with whole-stack selection', () => {
++    const $t = (key: string, options?: { values?: Record<string, unknown> }) =>
++      options?.values ? `${key} ${JSON.stringify(options.values)}` : key;
++    const stackRef = { id: 'raw-stack', assetCount: 3, primaryAssetId: 'raw' };
++
++    beforeEach(() => {
++      vitest.clearAllMocks();
++      setSharedLink(undefined as never);
++      const user = userAdminFactory.build();
++      authManager.setUser(user);
++      authManager.setPreferences(preferencesFactory.build({ tags: { enabled: true, sidebarWeb: false } }));
++      vitest.mocked(getFormatter).mockResolvedValue(String as never);
++    });
++
++    afterEach(() => {
++      assetMultiSelectManager.reset();
++      vitest.restoreAllMocks();
++    });
++
++    it('keeps upstream single-asset behavior while the toggle is off', async () => {
++      const asset = assetFactory.build({ stack: stackRef });
++      const resolve = vitest.spyOn(assetMultiSelectManager, 'getStackAssetsForAction');
++      const actions = getAssetActions($t as never, asset);
++
++      await actions.AddToAlbum.onAction?.(undefined as never);
++
++      expect(actions.AddToAlbum.title).toBe('add_to_album');
++      expect(resolve).not.toHaveBeenCalled();
++      expect(modalManager.show).toHaveBeenCalledWith('AssetAddToAlbumModal', { assetIds: [asset.id] });
++    });
++
++    it('applies album, share and tag actions to every refreshed stack member', async () => {
++      const asset = assetFactory.build({ stack: stackRef });
++      const members = timelineAssetFactory.buildList(3);
++      members[1].id = asset.id;
++      assetMultiSelectManager.selectWholeStack = true;
++      vitest.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(members);
++      const actions = getAssetActions($t as never, asset);
++      const assetIds = members.map(({ id }) => id);
++
++      expect(actions.AddToAlbum.title).toBe('whole_stack_action {"action":"add_to_album","count":3}');
++      await actions.AddToAlbum.onAction?.(undefined as never);
++      await actions.Share.onAction?.(undefined as never);
++      await actions.Tag.onAction?.(undefined as never);
++
++      expect(modalManager.show).toHaveBeenCalledWith('AssetAddToAlbumModal', { assetIds });
++      expect(modalManager.show).toHaveBeenCalledWith('SharedLinkCreateModal', { assetIds });
++      expect(modalManager.show).toHaveBeenCalledWith('AssetTagModal', { assetIds });
++    });
++
++    it('favorites every stack member in one request', async () => {
++      const user = userAdminFactory.build();
++      authManager.setUser(user);
++      const asset = assetFactory.build({ ownerId: user.id, isFavorite: false, stack: stackRef });
++      const members = timelineAssetFactory.buildList(3);
++      assetMultiSelectManager.selectWholeStack = true;
++      vitest.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(members);
++
++      await getAssetActions($t as never, asset).Favorite.onAction?.(undefined as never);
++
++      expect(updateAssets).toHaveBeenCalledWith({
++        assetBulkUpdateDto: { ids: members.map(({ id }) => id), isFavorite: true },
++      });
++    });
++
++    it('aborts instead of acting on the asset alone when the stack lookup fails', async () => {
++      const asset = assetFactory.build({ stack: stackRef });
++      assetMultiSelectManager.selectWholeStack = true;
++      vitest.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(undefined);
++      const actions = getAssetActions($t as never, asset);
++
++      await actions.AddToAlbum.onAction?.(undefined as never);
++
++      expect(toastManager.danger).toHaveBeenCalledWith('errors.unable_to_resolve_selected_stack');
++      expect(modalManager.show).not.toHaveBeenCalled();
++    });
++
++    it('keeps single-asset behavior for an unstacked asset while the toggle is on', async () => {
++      const asset = assetFactory.build({ stack: null });
++      assetMultiSelectManager.selectWholeStack = true;
++      const actions = getAssetActions($t as never, asset);
++
++      await actions.Share.onAction?.(undefined as never);
++
++      expect(actions.Share.title).toBe('share');
++      expect(modalManager.show).toHaveBeenCalledWith('SharedLinkCreateModal', { assetIds: [asset.id] });
++    });
++  });
+ });
+diff --git a/web/src/lib/services/asset.service.ts b/web/src/lib/services/asset.service.ts
+index 82c74fcc9..0f9cd0189 100644
+--- a/web/src/lib/services/asset.service.ts
++++ b/web/src/lib/services/asset.service.ts
+@@ -8,6 +8,7 @@ import {
+   removeAssetFromAlbum,
+   runAssetJobs,
+   updateAsset,
++  updateAssets,
+   type AlbumResponseDto,
+   type AssetJobsDto,
+   type AssetResponseDto,
+@@ -57,8 +58,10 @@ import { Route } from '$lib/route';
+ import { SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
+ import { getAssetMediaUrl, getSharedLink, sleep } from '$lib/utils';
+ import { downloadUrl } from '$lib/utils';
++import { downloadArchive } from '$lib/utils/asset-utils';
+ import { handleError } from '$lib/utils/handle-error';
+ import { getFormatter } from '$lib/utils/i18n';
++import { toTimelineAsset } from '$lib/utils/timeline-util';
+ 
+ export const getAssetBulkActions = ($t: MessageFormatter, album?: AlbumResponseDto) => {
+   const ownedAssets = assetMultiSelectManager.ownedAssets;
+@@ -181,19 +184,46 @@ export const getAssetActions = (
+   const isAlbumOwner = !!(authUser && authUser.id === album?.albumUsers[0].user.id);
+   const smartSearchEnabled = featureFlagsManager.value.smartSearch;
+ 
++  // With whole-stack selection on, these actions apply to every member of the asset's stack.
++  const stackCount = assetMultiSelectManager.selectWholeStack && asset.stack ? asset.stack.assetCount : undefined;
++  const stackTitle = (title: string) =>
++    stackCount ? $t('whole_stack_action', { values: { action: title, count: stackCount } }) : title;
++  const forAssetOrStack = async (
++    onAsset: () => unknown,
++    onStack: (assetIds: string[]) => unknown,
++  ): Promise<unknown> => {
++    if (!stackCount) {
++      return onAsset();
++    }
++    const assets = await assetMultiSelectManager.getStackAssetsForAction(toTimelineAsset(asset));
++    if (!assets) {
++      toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
++      return;
++    }
++    return onStack(assets.map(({ id }) => id));
++  };
++
+   const Share: ActionItem = {
+-    title: $t('share'),
++    title: stackTitle($t('share')),
+     icon: mdiShareVariantOutline,
+     $if: () => !!(authUser && !asset.isTrashed && asset.visibility !== AssetVisibility.Locked),
+-    onAction: () => modalManager.show(SharedLinkCreateModal, { assetIds: [asset.id] }),
++    onAction: () =>
++      forAssetOrStack(
++        () => modalManager.show(SharedLinkCreateModal, { assetIds: [asset.id] }),
++        (assetIds) => modalManager.show(SharedLinkCreateModal, { assetIds }),
++      ),
+   };
+ 
+   const Download: ActionItem = {
+-    title: $t('download'),
++    title: stackTitle($t('download')),
+     icon: mdiDownload,
+     shortcuts: { key: 'd', shift: true },
+     $if: () => !!authUser,
+-    onAction: () => handleDownloadAsset(asset, { edited: true }),
++    onAction: () =>
++      forAssetOrStack(
++        () => handleDownloadAsset(asset, { edited: true }),
++        (assetIds) => downloadArchive('immich', { assetIds }),
++      ),
+   };
+ 
+   const DownloadOriginal: ActionItem = {
+@@ -234,18 +264,26 @@ export const getAssetActions = (
+   };
+ 
+   const Favorite: ActionItem = {
+-    title: $t('to_favorite'),
++    title: stackTitle($t('to_favorite')),
+     icon: mdiHeartOutline,
+     $if: () => isOwner && !asset.isFavorite,
+-    onAction: () => handleFavorite(asset),
++    onAction: () =>
++      forAssetOrStack(
++        () => handleFavorite(asset),
++        (assetIds) => handleStackFavorite(asset, assetIds, true),
++      ),
+     shortcuts: [{ key: 'f' }],
+   };
+ 
+   const Unfavorite: ActionItem = {
+-    title: $t('unfavorite'),
++    title: stackTitle($t('unfavorite')),
+     icon: mdiHeart,
+     $if: () => isOwner && asset.isFavorite,
+-    onAction: () => handleUnfavorite(asset),
++    onAction: () =>
++      forAssetOrStack(
++        () => handleUnfavorite(asset),
++        (assetIds) => handleStackFavorite(asset, assetIds, false),
++      ),
+     shortcuts: [{ key: 'f' }],
+   };
+ 
+@@ -258,11 +296,15 @@ export const getAssetActions = (
+   };
+ 
+   const AddToAlbum: ActionItem = {
+-    title: $t('add_to_album'),
++    title: stackTitle($t('add_to_album')),
+     icon: mdiPlus,
+     shortcuts: [{ key: 'l' }],
+     $if: () => asset.visibility !== AssetVisibility.Locked && !asset.isTrashed,
+-    onAction: () => modalManager.show(AssetAddToAlbumModal, { assetIds: [asset.id] }),
++    onAction: () =>
++      forAssetOrStack(
++        () => modalManager.show(AssetAddToAlbumModal, { assetIds: [asset.id] }),
++        (assetIds) => modalManager.show(AssetAddToAlbumModal, { assetIds }),
++      ),
+   };
+ 
+   const RemoveFromAlbum: ActionItem = {
+@@ -311,10 +353,14 @@ export const getAssetActions = (
+   };
+ 
+   const Tag: ActionItem = {
+-    title: $t('add_tag'),
++    title: stackTitle($t('add_tag')),
+     icon: mdiTagPlusOutline,
+     $if: () => authManager.authenticated && authManager.preferences.tags.enabled,
+-    onAction: () => modalManager.show(AssetTagModal, { assetIds: [asset.id] }),
++    onAction: () =>
++      forAssetOrStack(
++        () => modalManager.show(AssetTagModal, { assetIds: [asset.id] }),
++        (assetIds) => modalManager.show(AssetTagModal, { assetIds }),
++      ),
+     shortcuts: { key: 't' },
+   };
+ 
+@@ -482,6 +528,22 @@ const handleFavorite = async (asset: AssetResponseDto) => {
+   }
+ };
+ 
++const handleStackFavorite = async (asset: AssetResponseDto, assetIds: string[], isFavorite: boolean) => {
++  const $t = await getFormatter();
++
++  try {
++    await updateAssets({ assetBulkUpdateDto: { ids: assetIds, isFavorite } });
++    toastManager.primary(
++      isFavorite
++        ? $t('added_to_favorites_count', { values: { count: assetIds.length } })
++        : $t('removed_from_favorites_count', { values: { count: assetIds.length } }),
++    );
++    eventManager.emit('AssetUpdate', await getAssetInfo({ ...authManager.params, id: asset.id }));
++  } catch (error) {
++    handleError(error, $t('errors.unable_to_add_remove_favorites', { values: { favorite: !isFavorite } }));
++  }
++};
++
+ const handleUnfavorite = async (asset: AssetResponseDto) => {
+   const $t = await getFormatter();
+ 

@@ -1,0 +1,545 @@
+name: Release
+
+# Builds immich-server for the newest upstream Immich release with patches/
+# applied to its web app, and publishes it as
+# ghcr.io/davidkneubuehler/immich-server:vX.Y.Z and :dkn-vX.Y.Z-N.
+# Upstream is checked out inside the run and never pushed anywhere.
+# Only runs on main publish: a dispatch on another branch applies the patches,
+# runs the checks and builds the image, but pushes and releases nothing.
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream release tag (vX.Y.Z). Empty builds the newest release.'
+        required: false
+        type: string
+        default: ''
+      force:
+        description: 'Publish a new revision even if the newest one already has the current patches.'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/davidkneubuehler/immich-server
+  UPSTREAM_REPOSITORY: immich-app/immich
+  # Files whose change makes a new revision of the same upstream release.
+  BUILD_INPUTS: patches Dockerfile docker-bake.hcl .dockerignore scripts
+
+jobs:
+  resolve:
+    name: Resolve release
+    if: github.repository == 'davidkneubuehler/immich-dkn'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.upstream.outputs.version }}
+      upstream_commit: ${{ steps.upstream.outputs.commit }}
+      upstream_image: ${{ steps.image.outputs.image }}
+      release_tag: ${{ steps.revision.outputs.release_tag }}
+      source_url: ${{ steps.revision.outputs.source_url }}
+      build: ${{ steps.revision.outputs.build || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_VERSION" ]; then
+            version=$INPUT_VERSION
+            prerelease=$(gh api "repos/$UPSTREAM_REPOSITORY/releases/tags/$version" --jq .prerelease)
+            if [ "$prerelease" != false ]; then
+              echo "::error title=Upstream release::$version is a prerelease."
+              exit 1
+            fi
+          else
+            # The latest release excludes drafts and prereleases.
+            version=$(gh api "repos/$UPSTREAM_REPOSITORY/releases/latest" --jq .tag_name)
+          fi
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Upstream release::Unexpected release tag '$version'."
+            exit 1
+          fi
+          commit=$(git ls-remote "https://github.com/$UPSTREAM_REPOSITORY.git" "refs/tags/$version" "refs/tags/$version^{}" | tail -n 1 | cut -f 1)
+          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Upstream release::Tag $version not found in $UPSTREAM_REPOSITORY."
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "commit=$commit"
+          } >> "$GITHUB_OUTPUT"
+          echo "Upstream $version: $commit" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+
+      - name: Resolve official image
+        id: image
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+          COMMIT: ${{ steps.upstream.outputs.commit }}
+          SCHEDULED: ${{ github.event_name == 'schedule' }}
+        run: |
+          set -euo pipefail
+          reference="ghcr.io/$UPSTREAM_REPOSITORY-server:$VERSION"
+          if ! digest=$(docker buildx imagetools inspect "$reference" --format '{{json .Manifest}}' | jq -re .digest); then
+            # Upstream publishes the release before its images are built.
+            if [ "$SCHEDULED" = true ]; then
+              echo "::notice title=Official image::$reference is not available yet; the next scheduled run tries again."
+              exit 0
+            fi
+            echo "::error title=Official image::$reference is not available."
+            exit 1
+          fi
+          revision=$(docker buildx imagetools inspect "$reference" --format '{{json .Image}}' \
+            | jq -r '(."linux/amd64" // .).config.Labels["org.opencontainers.image.revision"] // ""')
+          if [ -n "$revision" ] && [ "$revision" != "$COMMIT" ]; then
+            echo "::error title=Official image::$reference was built from $revision, but $VERSION is $COMMIT."
+            exit 1
+          fi
+          echo "image=${reference%:*}@$digest" >> "$GITHUB_OUTPUT"
+          echo "Official image: $reference@$digest" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Choose revision
+        id: revision
+        if: steps.image.outputs.image != ''
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+          FORCE: ${{ inputs.force == true }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image_exists() {
+            docker buildx imagetools inspect "$IMAGE:$1" > /dev/null 2>&1
+          }
+          latest=$(git tag -l "dkn-$VERSION-*" | sed "s/^dkn-$VERSION-//" | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)
+          # shellcheck disable=SC2086 # BUILD_INPUTS is a list of paths
+          if [ -n "$latest" ] && [ "$FORCE" != true ] \
+            && git diff --quiet "dkn-$VERSION-$latest" HEAD -- $BUILD_INPUTS \
+            && image_exists "dkn-$VERSION-$latest"; then
+            echo "dkn-$VERSION-$latest already has the current patches; nothing to publish." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          n=$((${latest:-0} + 1))
+          # Never overwrite an image tag that exists without a release here.
+          while image_exists "dkn-$VERSION-$n"; do
+            n=$((n + 1))
+          done
+          release_tag="dkn-$VERSION-$n"
+          {
+            echo "build=true"
+            echo "release_tag=$release_tag"
+            echo "source_url=https://github.com/$REPOSITORY/tree/$release_tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $release_tag" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  verify:
+    name: Apply patches and run web checks
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          scripts/prepare-source.sh "$VERSION" upstream 2>&1 | tee logs/patches.log
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          package_json_file: upstream/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: upstream/.nvmrc
+          cache: pnpm
+          cache-dependency-path: upstream/pnpm-lock.yaml
+
+      - name: Install web dependencies
+        working-directory: upstream
+        run: |
+          pnpm install --frozen-lockfile --filter immich-web... --filter @immich/sdk
+          pnpm --filter @immich/sdk build
+
+      - name: Run web unit tests
+        working-directory: upstream/web
+        run: |
+          set -o pipefail
+          pnpm exec vitest run 2>&1 | tee ../../logs/web-unit-tests.log
+
+      - name: Run svelte-check and TypeScript
+        working-directory: upstream/web
+        run: |
+          set -o pipefail
+          { pnpm run check:svelte && pnpm run check:typescript; } 2>&1 | tee ../../logs/web-checks.log
+
+      - name: Keep logs for the failure report
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-verify
+          path: logs/
+          if-no-files-found: ignore
+
+  e2e:
+    name: Stack selection E2E
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    env:
+      UPSTREAM_VERSION: ${{ needs.resolve.outputs.version }}
+      UPSTREAM_IMAGE: ${{ needs.resolve.outputs.upstream_image }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+      SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Apply patches
+        env:
+          WITH_SUBMODULES: '1'
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          scripts/prepare-source.sh "$UPSTREAM_VERSION" upstream "$SOURCE_URL" 2>&1 | tee logs/patches.log
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+
+      # The E2E compose file runs the image tagged immich-server:latest, so the
+      # specs test the same build that publish pushes, for linux/amd64.
+      - name: Build immich-server
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          BUILD_ID: ${{ github.run_id }}
+        run: |
+          set -o pipefail
+          docker buildx bake --load --set server.tags=immich-server:latest server 2>&1 | tee logs/build.log
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          package_json_file: upstream/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: upstream/.nvmrc
+          cache: pnpm
+          cache-dependency-path: upstream/**/pnpm-lock.yaml
+
+      - name: Install E2E dependencies
+        working-directory: upstream
+        run: |
+          pnpm --filter @immich/sdk install --frozen-lockfile
+          pnpm --filter @immich/sdk build
+          pnpm --dir web install --frozen-lockfile
+          pnpm --dir e2e install --frozen-lockfile
+          pnpm --dir e2e exec playwright install chromium --only-shell
+
+      - name: Start E2E environment
+        working-directory: upstream/e2e
+        # Image pulls hit registry rate limits now and then, so a failed start only costs retries.
+        run: |
+          docker compose build e2e-auth-server
+          for attempt in 1 2 3 4 5; do
+            if docker compose up -d --no-build --renew-anon-volumes --force-recreate --remove-orphans --wait --wait-timeout 300; then
+              exit 0
+            fi
+            sleep $((attempt * 30))
+          done
+          echo "::error title=E2E environment::docker compose up failed after 5 attempts."
+          exit 1
+
+      - name: Run stack-selection and source-link specs
+        working-directory: upstream/e2e
+        env:
+          PLAYWRIGHT_DISABLE_WEBSERVER: 'true'
+          PUBLIC_IMMICH_SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
+        run: |
+          set -o pipefail
+          pnpm test:web src/specs/web/stack-selection.e2e-spec.ts src/specs/web/source-link.e2e-spec.ts 2>&1 \
+            | tee ../../logs/e2e.log
+
+      - name: Capture Docker logs
+        if: always()
+        working-directory: upstream/e2e
+        run: docker compose logs --no-color > ../../logs/docker-compose.log 2>&1 || true
+
+      - name: Keep diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-diagnostics
+          path: |
+            logs/
+            upstream/e2e/playwright-report/
+          if-no-files-found: ignore
+
+      - name: Keep logs for the failure report
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: failure-e2e
+          path: logs/
+          if-no-files-found: ignore
+
+  publish:
+    name: Build, push and sign immich-server
+    needs: [resolve, verify, e2e]
+    # Patches reach the image only after Dave merged them into main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      UPSTREAM_VERSION: ${{ needs.resolve.outputs.version }}
+      UPSTREAM_IMAGE: ${{ needs.resolve.outputs.upstream_image }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Apply patches
+        env:
+          SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
+        run: scripts/prepare-source.sh "$UPSTREAM_VERSION" upstream "$SOURCE_URL"
+
+      # The final stage removes the old web app with RUN, also on linux/arm64.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+
+      - name: Build and push
+        id: build
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          BUILD_ID: ${{ github.run_id }}
+          BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PLATFORMS: linux/amd64,linux/arm64
+        run: |
+          set -euo pipefail
+          docker buildx bake --push --provenance mode=max --sbom true --metadata-file metadata.json server
+          digest=$(jq -re '.server["containerimage.digest"]' metadata.json)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "Pushed $IMAGE:$UPSTREAM_VERSION and $IMAGE:$RELEASE_TAG"
+            echo "Digest: $digest"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+
+      - name: Sign image keyless
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+
+      - name: Verify signature identity
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+        run: |
+          cosign verify "$IMAGE@$DIGEST" \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "Signature identity: $IDENTITY" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    name: Create GitHub release
+    needs: [resolve, publish]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          UPSTREAM_COMMIT: ${{ needs.resolve.outputs.upstream_commit }}
+          UPSTREAM_IMAGE: ${{ needs.resolve.outputs.upstream_image }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Immich $VERSION with the web patches of this repository. Unofficial and unsupported by the Immich project."
+            echo
+            echo "## Image"
+            echo
+            echo "- \`$IMAGE:$VERSION\`"
+            echo "- \`$IMAGE:$RELEASE_TAG\`"
+            echo "- Digest: \`$DIGEST\`"
+            echo "- Built on: \`$UPSTREAM_IMAGE\`"
+            echo "- Run: $RUN_URL"
+            echo
+            echo "## Source"
+            echo
+            echo "Upstream [\`$VERSION\`](https://github.com/$UPSTREAM_REPOSITORY/tree/$UPSTREAM_COMMIT) (\`$UPSTREAM_COMMIT\`) with these patches applied by \`git am -3\`:"
+            echo
+            for patch in patches/*.patch; do
+              echo "- [\`${patch#patches/}\`](https://github.com/$GITHUB_REPOSITORY/blob/$RELEASE_TAG/$patch)"
+            done
+            echo
+            echo "## Verify"
+            echo
+            echo '```sh'
+            echo "cosign verify $IMAGE@$DIGEST \\"
+            echo "  --certificate-identity '$IDENTITY' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo "gh attestation verify oci://$IMAGE@$DIGEST -R $GITHUB_REPOSITORY"
+            echo '```'
+          } > notes.md
+          gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes-file notes.md
+
+  report:
+    name: Report failure
+    needs: [resolve, verify, e2e, publish, release]
+    if: failure() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Collect logs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          pattern: failure-*
+          path: logs
+
+      - name: Open or update issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULTS: >-
+            resolve=${{ needs.resolve.result }}
+            verify=${{ needs.verify.result }}
+            e2e=${{ needs.e2e.result }}
+            publish=${{ needs.publish.result }}
+            release=${{ needs.release.result }}
+        run: |
+          set -euo pipefail
+          title="Release failed for upstream ${VERSION:-(unresolved)}"
+          {
+            echo "Run: $RUN_URL"
+            echo "Revision: ${RELEASE_TAG:-none}"
+            echo
+            echo "Job results: \`$RESULTS\`"
+            echo
+            echo "Nothing was published unless publish succeeded and only release failed."
+            failed=$(grep -h -A 12 -E 'Failed patch:|^::error' logs/*/patches.log 2>/dev/null || true)
+            if [ -n "$failed" ]; then
+              echo
+              echo "### Failing patch"
+              echo
+              echo '```'
+              echo "$failed"
+              echo '```'
+            fi
+            for log in logs/*/*.log; do
+              [ -e "$log" ] || continue
+              case "$log" in */patches.log | */docker-compose.log) continue ;; esac
+              echo
+              echo "<details><summary>${log#logs/} (last 80 lines)</summary>"
+              echo
+              echo '```'
+              tail -n 80 "$log" | cut -c 1-300
+              echo '```'
+              echo "</details>"
+            done
+          } > body.md
+          number=$(gh issue list --state open --limit 100 --json number,title \
+            | jq -r --arg title "$title" '[.[] | select(.title == $title)][0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi

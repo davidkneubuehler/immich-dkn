@@ -1,0 +1,207 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?David=20Kneub=C3=BChler?=
+ <26619522+davidkneubuehler@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 17:39:37 +0200
+Subject: [PATCH 3/3] fix(web): keep whole-stack viewer actions after asset
+ updates
+
+Asset updates pushed by the server carry no stack summary. After one
+replaced the asset on screen, for example after adding it to an album,
+whole-stack viewer actions acted on that asset alone. The navigation bar
+now falls back to the stack the viewer loaded.
+
+The marked-set E2E test also waits for the viewer to show the next asset
+before marking it.
+---
+ e2e/src/specs/web/stack-selection.e2e-spec.ts |  3 +++
+ .../asset-viewer/AssetViewerNavBar.svelte     | 22 +++++++++++++++----
+ .../asset-viewer/actions/ArchiveAction.svelte | 16 +++++++++-----
+ .../asset-viewer/actions/DeleteAction.spec.ts | 18 +++++++++++++++
+ .../asset-viewer/actions/DeleteAction.svelte  | 16 +++++++++-----
+ 5 files changed, 59 insertions(+), 16 deletions(-)
+
+diff --git a/e2e/src/specs/web/stack-selection.e2e-spec.ts b/e2e/src/specs/web/stack-selection.e2e-spec.ts
+index 7016b6ad8..f746a33ee 100644
+--- a/e2e/src/specs/web/stack-selection.e2e-spec.ts
++++ b/e2e/src/specs/web/stack-selection.e2e-spec.ts
+@@ -527,7 +527,10 @@ test.describe('Asset viewer selection', () => {
+     const { admin, fixture } = await setupViewer({ context, page });
+     await openViewer(page, fixture.ordinary);
+     await page.keyboard.press('x');
++    await expect(viewerSelection(page).getByText('1 selected', { exact: true })).toBeVisible();
+     const nextId = await viewNextAsset(page, fixture.ordinary);
++    // Wait until the viewer shows the next, unmarked asset before marking it.
++    await expect(markButton(page)).toHaveAttribute('aria-pressed', 'false');
+     await page.keyboard.press('x');
+     await expect(viewerSelection(page).getByText('2 selected', { exact: true })).toBeVisible();
+     await expect(viewerSelection(page).getByRole('button', { name: 'Trash 2' })).toBeVisible();
+diff --git a/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte b/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte
+index 2ded0dfbb..75e00b88e 100644
+--- a/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte
++++ b/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte
+@@ -82,7 +82,14 @@
+     onAction: () => setPlayOriginalVideo(!isPlayingOriginalVideo),
+   });
+ 
+-  const Actions = $derived(getAssetActions($t, { ...asset, stackPrimaryAssetId: stack?.primaryAssetId }, album));
++  // Asset updates from the server carry no stack summary, so fall back to the stack the viewer loaded.
++  const stackSummary = $derived(
++    asset.stack ??
++      (stack ? { id: stack.id, primaryAssetId: stack.primaryAssetId, assetCount: stack.assets.length } : undefined),
++  );
++  const Actions = $derived(
++    getAssetActions($t, { ...asset, stack: stackSummary, stackPrimaryAssetId: stack?.primaryAssetId }, album),
++  );
+   const StackActions = $derived(getStackActions($t, stack, asset));
+   const sharedLink = getSharedLink();
+   const showSelectionControls = $derived(selectable && authManager.authenticated && !sharedLink);
+@@ -96,7 +103,14 @@
+   <div class="dark flex items-center gap-1">
+     <ActionButton action={Close} />
+     {#if showSelectionControls}
+-      <ViewerSelectionControls {asset} {album} {preAction} {onAction} {onUndoDelete} {selectionActions} />
++      <ViewerSelectionControls
++        asset={{ ...asset, stack: stackSummary }}
++        {album}
++        {preAction}
++        {onAction}
++        {onUndoDelete}
++        {selectionActions}
++      />
+     {/if}
+   </div>
+ 
+@@ -128,7 +142,7 @@
+     <ActionButton action={Actions.Edit} />
+ 
+     {#if isOwner}
+-      <DeleteAction {asset} {onAction} {preAction} {onUndoDelete} />
++      <DeleteAction {asset} {stackSummary} {onAction} {preAction} {onUndoDelete} />
+     {/if}
+ 
+     {#if !sharedLink}
+@@ -163,7 +177,7 @@
+         <ActionMenuItem action={Actions.SetProfilePicture} />
+ 
+         {#if isOwner && !isLocked}
+-          <ArchiveAction {asset} {onAction} {preAction} />
++          <ArchiveAction {asset} {stackSummary} {onAction} {preAction} />
+         {/if}
+         <ActionMenuItem action={Actions.ViewInTimeline} />
+         <ActionMenuItem action={Actions.ViewSimilar} />
+diff --git a/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte b/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte
+index 21edbf416..8668bc1a5 100644
+--- a/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte
++++ b/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte
+@@ -8,7 +8,7 @@
+   import { eventManager } from '$lib/managers/event-manager.svelte';
+   import { archiveAssets, toggleArchive } from '$lib/utils/asset-utils';
+   import { toTimelineAsset } from '$lib/utils/timeline-util';
+-  import { AssetVisibility, getAssetInfo, type AssetResponseDto } from '@immich/sdk';
++  import { AssetVisibility, getAssetInfo, type AssetResponseDto, type AssetStackResponseDto } from '@immich/sdk';
+   import { toastManager } from '@immich/ui';
+   import { mdiArchiveArrowDownOutline, mdiArchiveArrowUpOutline } from '@mdi/js';
+   import { t } from 'svelte-i18n';
+@@ -17,20 +17,24 @@
+     asset: AssetResponseDto;
+     onAction: OnAction;
+     preAction: PreAction;
++    /** The stack of the asset on screen, when the asset itself carries no stack summary. */
++    stackSummary?: AssetStackResponseDto;
+   }
+ 
+-  let { asset, onAction, preAction }: Props = $props();
++  let { asset, onAction, preAction, stackSummary }: Props = $props();
+ 
+-  const stackCount = $derived(
+-    assetMultiSelectManager.selectWholeStack && asset.stack ? asset.stack.assetCount : undefined,
+-  );
++  const stackRef = $derived(asset.stack ?? stackSummary);
++  const stackCount = $derived(assetMultiSelectManager.selectWholeStack && stackRef ? stackRef.assetCount : undefined);
+   const text = $derived.by(() => {
+     const action = asset.isArchived ? $t('unarchive') : $t('to_archive');
+     return stackCount ? $t('whole_stack_action', { values: { action, count: stackCount } }) : action;
+   });
+ 
+   const onArchiveStack = async () => {
+-    const assets = await assetMultiSelectManager.getStackAssetsForAction(toTimelineAsset(asset));
++    const assets = await assetMultiSelectManager.getStackAssetsForAction({
++      ...toTimelineAsset(asset),
++      stack: stackRef ?? null,
++    });
+     if (!assets) {
+       toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+       return;
+diff --git a/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
+index 8ca732ce7..26b54aa4c 100644
+--- a/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
++++ b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
+@@ -86,6 +86,24 @@ describe('DeleteAction component', () => {
+       expect(preAction).toHaveBeenCalledWith(expect.objectContaining({ type: 'trash', assetIds }));
+     });
+ 
++    it('uses the loaded stack when an asset update dropped the stack summary', async () => {
++      const members = timelineAssetFactory.buildList(3);
++      const resolve = vi.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(members);
++      const updatedAsset = { ...asset, stack: undefined };
++      const { getByLabelText } = renderWithTooltips(DeleteAction, {
++        asset: updatedAsset,
++        stackSummary: stackRef,
++        onAction: vi.fn(),
++        preAction: vi.fn(),
++      });
++
++      await fireEvent.click(getByLabelText('whole_stack_action'));
++
++      await vi.waitFor(() => expect(deleteAssets).toHaveBeenCalled());
++      expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ id: asset.id, stack: stackRef }));
++      expect(vi.mocked(deleteAssets).mock.calls[0][2]).toEqual(members);
++    });
++
+     it('deletes nothing when the stack lookup fails', async () => {
+       vi.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(undefined);
+       const preAction = vi.fn();
+diff --git a/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte b/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte
+index 51cbe7c52..042fa4a3e 100644
+--- a/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte
++++ b/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte
+@@ -8,7 +8,7 @@
+   import { deleteAssets as deleteAssetsUtil, type OnUndoDelete } from '$lib/utils/actions';
+   import { handleError } from '$lib/utils/handle-error';
+   import { toTimelineAsset } from '$lib/utils/timeline-util';
+-  import { deleteAssets, type AssetResponseDto } from '@immich/sdk';
++  import { deleteAssets, type AssetResponseDto, type AssetStackResponseDto } from '@immich/sdk';
+   import { IconButton, modalManager, toastManager } from '@immich/ui';
+   import { mdiDeleteForeverOutline, mdiDeleteOutline } from '@mdi/js';
+   import { t } from 'svelte-i18n';
+@@ -19,21 +19,25 @@
+     onAction: OnAction;
+     preAction: PreAction;
+     onUndoDelete?: OnUndoDelete;
++    /** The stack of the asset on screen, when the asset itself carries no stack summary. */
++    stackSummary?: AssetStackResponseDto;
+   }
+ 
+-  let { asset, onAction, preAction, onUndoDelete = undefined }: Props = $props();
++  let { asset, onAction, preAction, onUndoDelete = undefined, stackSummary }: Props = $props();
+ 
+   const forceDefault = $derived(asset.isTrashed || !featureFlagsManager.value.trash);
+-  const stackCount = $derived(
+-    assetMultiSelectManager.selectWholeStack && asset.stack ? asset.stack.assetCount : undefined,
+-  );
++  const stackRef = $derived(asset.stack ?? stackSummary);
++  const stackCount = $derived(assetMultiSelectManager.selectWholeStack && stackRef ? stackRef.assetCount : undefined);
+   const label = $derived.by(() => {
+     const action = forceDefault ? $t('permanently_delete') : $t('delete');
+     return stackCount ? $t('whole_stack_action', { values: { action, count: stackCount } }) : action;
+   });
+ 
+   const trashOrDeleteStack = async (forceRequest?: boolean) => {
+-    const assets = await assetMultiSelectManager.getStackAssetsForAction(toTimelineAsset(asset));
++    const assets = await assetMultiSelectManager.getStackAssetsForAction({
++      ...toTimelineAsset(asset),
++      stack: stackRef ?? null,
++    });
+     if (!assets) {
+       toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
+       return;

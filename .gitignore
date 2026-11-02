@@ -1,0 +1,10 @@
+# Upstream checkouts and build outputs of scripts/prepare-source.sh and bake
+/upstream/
+/logs/
+metadata.json
+notes.md
+body.md
+
+.claude/settings.local.json
+.claude/.cc-writes/
+.DS_Store
