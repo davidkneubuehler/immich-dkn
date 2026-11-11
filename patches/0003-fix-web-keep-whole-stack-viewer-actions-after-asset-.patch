@@ -21,10 +21,10 @@ before marking it.
  5 files changed, 59 insertions(+), 16 deletions(-)
 
 diff --git a/e2e/src/specs/web/stack-selection.e2e-spec.ts b/e2e/src/specs/web/stack-selection.e2e-spec.ts
-index 7016b6ad8..f746a33ee 100644
+index 0b8d16af7..3254938bf 100644
 --- a/e2e/src/specs/web/stack-selection.e2e-spec.ts
 +++ b/e2e/src/specs/web/stack-selection.e2e-spec.ts
-@@ -527,7 +527,10 @@ test.describe('Asset viewer selection', () => {
+@@ -536,7 +536,10 @@ test.describe('Asset viewer selection', () => {
      const { admin, fixture } = await setupViewer({ context, page });
      await openViewer(page, fixture.ordinary);
      await page.keyboard.press('x');
@@ -133,10 +133,10 @@ index 5dc319b4b..1079899fb 100644
        toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
        return;
 diff --git a/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
-index 907511551..53b3b7e47 100644
+index 7dc796c78..ff9d18f30 100644
 --- a/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
 +++ b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
-@@ -51,6 +51,24 @@ describe('DeleteAction component', () => {
+@@ -49,6 +49,24 @@ describe('DeleteAction component', () => {
        expect(preAction).toHaveBeenCalledWith(expect.objectContaining({ type: 'trash', assetIds }));
      });
  

@@ -33,9 +33,16 @@ how the build and release work.
      `check:typescript` and `lint` in `web/`. In the agent sandbox:
      - pnpm 12 keeps its store locks in `/tmp`, which the sandbox blocks; set
        `XDG_RUNTIME_DIR` to a `chmod 700` directory under `$TMPDIR`.
-     - Since v3.4.0 the unit tests (`vitest run`) run in headless Chromium,
-       which cannot start in the sandbox (it is denied a Mach port). They run
-       in CI; say so in the pull request.
+     - Since v3.4.0 the unit tests (`vitest run`) run in headless Chromium.
+       Its default process model is denied a Mach port in the sandbox, and a
+       single-process Chromium can open only one browser context. Run them
+       with an untracked `vitest.local.config.ts` in `web/` that imports
+       `vite.config.ts` and replaces `test.browser.provider` with
+       `playwright({ contextOptions: { timezoneId: 'UTC', locale: 'en-US' },
+       persistentContext: <dir under $TMPDIR>, launchOptions: { args:
+       ['--single-process', '--no-zygote', '--no-sandbox'] } })`, then
+       `vitest run -c vitest.local.config.ts --no-file-parallelism`. Set
+       `PLAYWRIGHT_BROWSERS_PATH` under `$TMPDIR` for the browser download.
      - `check:typescript` reports errors in route `+page.ts`/`+layout.ts` files
        (missing generated `./$types`) on unpatched upstream too; compare the
        error list with unpatched upstream instead of expecting zero.

@@ -19,13 +19,13 @@ the action aborts when the lookup fails. Labels state the asset count.
 The toggle now stays on until the page changes. With the toggle off,
 viewer actions behave as upstream.
 ---
- e2e/src/specs/web/stack-selection.e2e-spec.ts | 274 +++++++++++++++++-
+ e2e/src/specs/web/stack-selection.e2e-spec.ts | 275 +++++++++++++++++-
  i18n/en.json                                  |   6 +
  .../asset-viewer/AssetViewer.svelte           |  19 +-
  .../asset-viewer/AssetViewerNavBar.svelte     |  12 +-
  .../ViewerSelectionControls.svelte            | 199 +++++++++++++
  .../asset-viewer/actions/ArchiveAction.svelte |  42 ++-
- .../asset-viewer/actions/DeleteAction.spec.ts |  66 +++++
+ .../asset-viewer/actions/DeleteAction.spec.ts |  64 ++++
  .../asset-viewer/actions/DeleteAction.svelte  |  36 ++-
  .../components/asset-viewer/actions/action.ts |  14 +-
  .../gallery-viewer/GalleryViewer.svelte       |  57 +++-
@@ -34,14 +34,14 @@ viewer actions behave as upstream.
  .../asset-multi-select-manager.svelte.spec.ts |  96 ++++++
  .../asset-multi-select-manager.svelte.ts      |  41 ++-
  web/src/lib/modals/ShortcutsModal.svelte      |   3 +
- web/src/lib/services/asset.service.spec.ts    |  94 +++++-
+ web/src/lib/services/asset.service.spec.ts    | 100 ++++++-
  web/src/lib/services/asset.service.ts         |  87 +++++-
- 17 files changed, 1079 insertions(+), 38 deletions(-)
+ 17 files changed, 1084 insertions(+), 38 deletions(-)
  create mode 100644 web/src/lib/components/asset-viewer/ViewerSelectionControls.svelte
  create mode 100644 web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
 
 diff --git a/e2e/src/specs/web/stack-selection.e2e-spec.ts b/e2e/src/specs/web/stack-selection.e2e-spec.ts
-index 8e0259335..7016b6ad8 100644
+index fe641a464..0b8d16af7 100644
 --- a/e2e/src/specs/web/stack-selection.e2e-spec.ts
 +++ b/e2e/src/specs/web/stack-selection.e2e-spec.ts
 @@ -1,7 +1,7 @@
@@ -54,7 +54,7 @@ index 8e0259335..7016b6ad8 100644
  
  type Fixture = {
    stackOne: string[];
-@@ -84,8 +84,13 @@ const setup = async ({
+@@ -91,8 +91,13 @@ const reloadWith = async (page: Page, id: string) => {
  
  const selectExpandedStack = async (page: Page, fixture: Fixture) => {
    await selectAsset(page, fixture.stackOne[0]);
@@ -70,7 +70,7 @@ index 8e0259335..7016b6ad8 100644
    await expect(page.getByText('2 selected')).toBeVisible();
  };
  
-@@ -311,3 +316,264 @@ test.describe('Stack selection', () => {
+@@ -319,3 +324,265 @@ test.describe('Stack selection', () => {
      await expect(page.getByText('1 selected')).toBeVisible();
    });
  });
@@ -228,6 +228,7 @@ index 8e0259335..7016b6ad8 100644
 +  test('expands marks and actions to a RAW-primary stack only while the toggle is on', async ({ context, page }) => {
 +    const { admin, fixture } = await setupViewer({ context, page });
 +    const album = await utils.createAlbum(admin.accessToken, { albumName: 'Viewer stack album' });
++    await reloadWith(page, fixture.rawStack[0]);
 +    const addToAlbum = async (title: string, expected: string[]) => {
 +      const request = page.waitForRequest((request) => request.url().endsWith(`/api/albums/${album.id}/assets`));
 +      await page.getByRole('button', { name: 'More' }).click();
@@ -787,10 +788,10 @@ index d8513a0c6..5dc319b4b 100644
  />
 diff --git a/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
 new file mode 100644
-index 000000000..907511551
+index 000000000..7dc796c78
 --- /dev/null
 +++ b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,64 @@
 +import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
 +import { deleteAssets } from '#lib/utils/actions.ts';
 +import { factory } from '#test/unit/factories.ts';
@@ -798,15 +799,12 @@ index 000000000..907511551
 +import type { AssetResponseDto } from '@immich/sdk';
 +import DeleteAction from './DeleteAction.svelte';
 +
-+vi.mock(import('#lib/managers/feature-flags-manager.svelte.js'), () => {
++vi.mock(import('#lib/managers/feature-flags-manager.svelte.ts'), () => {
 +  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 +  return { featureFlagsManager: { init: vi.fn(), loadFeatureFlags: vi.fn(), value: { trash: true } } as any };
 +});
 +
-+vi.mock(import('#lib/utils/actions.js'), async (importOriginal) => ({
-+  ...(await importOriginal()),
-+  deleteAssets: vi.fn(),
-+}));
++vi.mock(import('#lib/utils/actions.ts'), { spy: true });
 +
 +describe('DeleteAction component', () => {
 +  describe('with whole-stack selection on', () => {
@@ -815,6 +813,7 @@ index 000000000..907511551
 +
 +    beforeEach(() => {
 +      vi.clearAllMocks();
++      vi.mocked(deleteAssets).mockResolvedValue(undefined);
 +      asset = factory.asset({ isTrashed: false, stack: stackRef });
 +      assetMultiSelectManager.selectWholeStack = true;
 +    });
@@ -1185,7 +1184,7 @@ index 73aa402ac..e8ca1653b 100644
 +  </AssetViewer>
  {/await}
 diff --git a/web/src/lib/managers/asset-multi-select-manager.svelte.spec.ts b/web/src/lib/managers/asset-multi-select-manager.svelte.spec.ts
-index 46227d841..ddb06b6d0 100644
+index 0ba0f3251..b1ef2b9ae 100644
 --- a/web/src/lib/managers/asset-multi-select-manager.svelte.spec.ts
 +++ b/web/src/lib/managers/asset-multi-select-manager.svelte.spec.ts
 @@ -1,5 +1,6 @@
@@ -1195,7 +1194,7 @@ index 46227d841..ddb06b6d0 100644
  import { factory } from '#test/unit/factories.ts';
  import { AssetVisibility, getStack, type StackResponseDto } from '@immich/sdk';
  
-@@ -358,4 +359,99 @@ describe('AssetMultiSelectManager', () => {
+@@ -356,4 +357,99 @@ describe('AssetMultiSelectManager', () => {
      await expect(enableWholeStack).resolves.toBe(true);
      expect(sut.selectWholeStack).toBe(true);
    });
@@ -1390,24 +1389,27 @@ index 909cd797d..2a27280a1 100644
            ? [{ key: ['0-5'], action: $t('rate_asset'), info: $t('rate_asset_description') }]
            : []),
 diff --git a/web/src/lib/services/asset.service.spec.ts b/web/src/lib/services/asset.service.spec.ts
-index 2821e8213..ca763ea8e 100644
+index 2821e8213..b0ee1fa91 100644
 --- a/web/src/lib/services/asset.service.spec.ts
 +++ b/web/src/lib/services/asset.service.spec.ts
-@@ -1,8 +1,12 @@
+@@ -1,8 +1,15 @@
  import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
  import { authManager } from '#lib/managers/auth-manager.svelte.ts';
  import AssetAddToAlbumModal from '#lib/modals/AssetAddToAlbumModal.svelte';
 -import { getAssetBulkActions } from '#lib/services/asset.service.ts';
 +import AssetTagModal from '#lib/modals/AssetTagModal.svelte';
 +import SharedLinkCreateModal from '#lib/modals/SharedLinkCreateModal.svelte';
++import { queryClient } from '#lib/queries/client.ts';
++import { getUserConfigQuery } from '#lib/queries/config-user.query.ts';
 +import { getAssetActions, getAssetBulkActions } from '#lib/services/asset.service.ts';
 +import { setSharedLink } from '#lib/utils.ts';
++import { payload } from '#test/common/payloads.ts';
  import { factory } from '#test/unit/factories.ts';
 +import { test } from '#test/unit/fixtures.ts';
  import { modalManager, toastManager } from '@immich/ui';
  
  describe('AssetService', () => {
-@@ -39,4 +43,92 @@ describe('AssetService', () => {
+@@ -39,4 +46,95 @@ describe('AssetService', () => {
        expect(modalManager.show).not.toHaveBeenCalled();
      });
    });
@@ -1421,12 +1423,14 @@ index 2821e8213..ca763ea8e 100644
 +      setSharedLink(undefined as never);
 +      authManager.setUser(factory.user());
 +      authManager.setPreferences(factory.preferences({ tags: { enabled: true, sidebarWeb: false } }));
++      queryClient.setQueryData(getUserConfigQuery().queryKey, payload.userConfig());
 +      vi.spyOn(modalManager, 'show').mockResolvedValue(undefined as never);
 +      vi.spyOn(toastManager, 'danger').mockImplementation(() => undefined as never);
 +    });
 +
 +    afterEach(() => {
 +      assetMultiSelectManager.reset();
++      queryClient.removeQueries({ queryKey: getUserConfigQuery().queryKey });
 +      vi.restoreAllMocks();
 +    });
 +
@@ -1461,10 +1465,11 @@ index 2821e8213..ca763ea8e 100644
 +      expect(modalManager.show).toHaveBeenCalledWith(AssetTagModal, { assetIds });
 +    });
 +
-+    test('favorites every stack member in one request', async ({ api }) => {
++    test('favorites every stack member in one request', async ({ api, data }) => {
 +      const user = factory.user();
 +      authManager.setUser(user);
 +      const asset = factory.asset({ ownerId: user.id, isFavorite: false, stack: stackRef });
++      data.addAssets(asset);
 +      const members = factory.many(3, () => factory.timelineAsset());
 +      assetMultiSelectManager.selectWholeStack = true;
 +      vi.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(members);
