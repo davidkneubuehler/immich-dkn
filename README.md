@@ -79,7 +79,7 @@ The patches are a `git format-patch` series made against an upstream tag. To
 change them or carry them to a new upstream release:
 
 ```sh
-version=v3.3.5
+version=v3.4.0
 work=$(mktemp -d)/immich
 scripts/prepare-source.sh "$version" "$work"   # upstream tag + patches as commits
 ```
@@ -95,6 +95,8 @@ cd "$work"
 pnpm install --frozen-lockfile --filter immich-web... --filter @immich/sdk
 pnpm --filter @immich/sdk build
 cd web
+pnpm exec playwright install chromium-headless-shell   # unit tests run in headless Chromium
+pnpm exec svelte-kit sync
 pnpm exec vitest run && pnpm run check:svelte && pnpm run check:typescript && pnpm run lint
 ```
 

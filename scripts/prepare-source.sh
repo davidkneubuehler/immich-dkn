@@ -58,13 +58,17 @@ fi
 # The identity only labels the local commits; nothing from this checkout is pushed.
 if ! git -c user.name=immich-dkn -c user.email=immich-dkn@users.noreply.github.com \
   am --quiet -3 "${series[@]}"; then
-  failed=$(git am --show-current-patch=raw 2>/dev/null | sed -n 's/^Subject: \(\[PATCH[^]]*\] \)\{0,1\}//p' | head -n 1)
-  applied=$(git rev-list --count "$version..HEAD")
-  echo "::error title=Patch failed::${series[$applied]##*/} ($failed) does not apply to $version"
+  # Read the stopped session's state from files: a failing diagnostic must not
+  # end the script (set -e) before the report below is complete.
+  next=$(cat "$(git rev-parse --git-path rebase-apply/next 2>/dev/null)" 2>/dev/null || echo 1)
+  applied=$((next - 1))
+  patch=${series[$applied]}
+  subject=$(sed -n 's/^Subject: \(\[PATCH[^]]*\] \)\{0,1\}//p' "$patch" | head -n 1 || true)
+  echo "::error title=Patch failed::${patch##*/} ($subject) does not apply to $version"
   echo "Applied cleanly: $applied of ${#series[@]}"
-  echo "Failed patch: ${series[$applied]##*/}"
+  echo "Failed patch: ${patch##*/}"
   echo "Conflicts:"
-  git diff --name-only --diff-filter=U | sed 's/^/  /'
+  git diff --name-only --diff-filter=U 2>/dev/null | sed 's/^/  /' || true
   exit 1
 fi
 
