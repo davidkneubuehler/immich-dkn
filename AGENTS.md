@@ -28,9 +28,17 @@ how the build and release work.
   2. Edit and commit there. Keep one commit per logical change and amend the
      commit a fix belongs to instead of adding fix-up commits. Commit messages
      follow upstream's Conventional Commits style (`feat(web): ...`).
-  3. Run the web checks there with upstream's Node version (`.nvmrc`; newer
-     Node breaks the vitest DOM setup) and pnpm version (`package.json`):
-     `vitest run`, `check:svelte`, `check:typescript` and `lint` in `web/`.
+  3. Run the web checks there with upstream's Node version (`.nvmrc`) and
+     pnpm version (`package.json`): `svelte-kit sync`, then `check:svelte`,
+     `check:typescript` and `lint` in `web/`. In the agent sandbox:
+     - pnpm 12 keeps its store locks in `/tmp`, which the sandbox blocks; set
+       `XDG_RUNTIME_DIR` to a `chmod 700` directory under `$TMPDIR`.
+     - Since v3.4.0 the unit tests (`vitest run`) run in headless Chromium,
+       which cannot start in the sandbox (it is denied a Mach port). They run
+       in CI; say so in the pull request.
+     - `check:typescript` reports errors in route `+page.ts`/`+layout.ts` files
+       (missing generated `./$types`) on unpatched upstream too; compare the
+       error list with unpatched upstream instead of expecting zero.
   4. Replace `patches/*.patch` with
      `git format-patch --zero-commit --no-signature --base=vX.Y.Z -o <repo>/patches vX.Y.Z`.
 - Base the series on the newest upstream release the workflow builds, and

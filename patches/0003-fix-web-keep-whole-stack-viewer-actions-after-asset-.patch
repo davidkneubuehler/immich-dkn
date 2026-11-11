@@ -36,7 +36,7 @@ index 7016b6ad8..f746a33ee 100644
      await expect(viewerSelection(page).getByText('2 selected', { exact: true })).toBeVisible();
      await expect(viewerSelection(page).getByRole('button', { name: 'Trash 2' })).toBeVisible();
 diff --git a/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte b/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte
-index 2ded0dfbb..75e00b88e 100644
+index 45e64db53..1f217ae3b 100644
 --- a/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte
 +++ b/web/src/lib/components/asset-viewer/AssetViewerNavBar.svelte
 @@ -82,7 +82,14 @@
@@ -55,7 +55,7 @@ index 2ded0dfbb..75e00b88e 100644
    const StackActions = $derived(getStackActions($t, stack, asset));
    const sharedLink = getSharedLink();
    const showSelectionControls = $derived(selectable && authManager.authenticated && !sharedLink);
-@@ -96,7 +103,14 @@
+@@ -97,7 +104,14 @@
    <div class="dark flex items-center gap-1">
      <ActionButton action={Close} />
      {#if showSelectionControls}
@@ -71,7 +71,7 @@ index 2ded0dfbb..75e00b88e 100644
      {/if}
    </div>
  
-@@ -128,7 +142,7 @@
+@@ -129,7 +143,7 @@
      <ActionButton action={Actions.Edit} />
  
      {#if isOwner}
@@ -80,7 +80,7 @@ index 2ded0dfbb..75e00b88e 100644
      {/if}
  
      {#if !sharedLink}
-@@ -163,7 +177,7 @@
+@@ -164,7 +178,7 @@
          <ActionMenuItem action={Actions.SetProfilePicture} />
  
          {#if isOwner && !isLocked}
@@ -90,19 +90,19 @@ index 2ded0dfbb..75e00b88e 100644
          <ActionMenuItem action={Actions.ViewInTimeline} />
          <ActionMenuItem action={Actions.ViewSimilar} />
 diff --git a/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte b/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte
-index 21edbf416..8668bc1a5 100644
+index 5dc319b4b..1079899fb 100644
 --- a/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte
 +++ b/web/src/lib/components/asset-viewer/actions/ArchiveAction.svelte
-@@ -8,7 +8,7 @@
-   import { eventManager } from '$lib/managers/event-manager.svelte';
-   import { archiveAssets, toggleArchive } from '$lib/utils/asset-utils';
-   import { toTimelineAsset } from '$lib/utils/timeline-util';
+@@ -9,7 +9,7 @@
+   import { handleSetVisibility } from '#lib/services/asset.service.ts';
+   import { toggleArchive } from '#lib/utils/asset-utils.ts';
+   import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
 -  import { AssetVisibility, getAssetInfo, type AssetResponseDto } from '@immich/sdk';
 +  import { AssetVisibility, getAssetInfo, type AssetResponseDto, type AssetStackResponseDto } from '@immich/sdk';
    import { toastManager } from '@immich/ui';
    import { mdiArchiveArrowDownOutline, mdiArchiveArrowUpOutline } from '@mdi/js';
    import { t } from 'svelte-i18n';
-@@ -17,20 +17,24 @@
+@@ -18,20 +18,24 @@
      asset: AssetResponseDto;
      onAction: OnAction;
      preAction: PreAction;
@@ -133,25 +133,25 @@ index 21edbf416..8668bc1a5 100644
        toastManager.danger($t('errors.unable_to_resolve_selected_stack'));
        return;
 diff --git a/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
-index 8ca732ce7..26b54aa4c 100644
+index 907511551..53b3b7e47 100644
 --- a/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
 +++ b/web/src/lib/components/asset-viewer/actions/DeleteAction.spec.ts
-@@ -86,6 +86,24 @@ describe('DeleteAction component', () => {
+@@ -51,6 +51,24 @@ describe('DeleteAction component', () => {
        expect(preAction).toHaveBeenCalledWith(expect.objectContaining({ type: 'trash', assetIds }));
      });
  
 +    it('uses the loaded stack when an asset update dropped the stack summary', async () => {
-+      const members = timelineAssetFactory.buildList(3);
++      const members = factory.many(3, () => factory.timelineAsset());
 +      const resolve = vi.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(members);
 +      const updatedAsset = { ...asset, stack: undefined };
-+      const { getByLabelText } = renderWithTooltips(DeleteAction, {
++      const screen = await renderWithTooltips(DeleteAction, {
 +        asset: updatedAsset,
 +        stackSummary: stackRef,
 +        onAction: vi.fn(),
 +        preAction: vi.fn(),
 +      });
 +
-+      await fireEvent.click(getByLabelText('whole_stack_action'));
++      await screen.getByLabelText('whole_stack_action').click();
 +
 +      await vi.waitFor(() => expect(deleteAssets).toHaveBeenCalled());
 +      expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ id: asset.id, stack: stackRef }));
@@ -162,13 +162,13 @@ index 8ca732ce7..26b54aa4c 100644
        vi.spyOn(assetMultiSelectManager, 'getStackAssetsForAction').mockResolvedValue(undefined);
        const preAction = vi.fn();
 diff --git a/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte b/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte
-index 51cbe7c52..042fa4a3e 100644
+index cc5d64e3a..b3e262adc 100644
 --- a/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte
 +++ b/web/src/lib/components/asset-viewer/actions/DeleteAction.svelte
 @@ -8,7 +8,7 @@
-   import { deleteAssets as deleteAssetsUtil, type OnUndoDelete } from '$lib/utils/actions';
-   import { handleError } from '$lib/utils/handle-error';
-   import { toTimelineAsset } from '$lib/utils/timeline-util';
+   import { deleteAssets as deleteAssetsUtil, type OnUndoDelete } from '#lib/utils/actions.ts';
+   import { handleError } from '#lib/utils/handle-error.ts';
+   import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
 -  import { deleteAssets, type AssetResponseDto } from '@immich/sdk';
 +  import { deleteAssets, type AssetResponseDto, type AssetStackResponseDto } from '@immich/sdk';
    import { IconButton, modalManager, toastManager } from '@immich/ui';
