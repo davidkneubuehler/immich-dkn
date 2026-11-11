@@ -199,6 +199,10 @@ jobs:
           pnpm install --frozen-lockfile --filter immich-web... --filter @immich/sdk
           pnpm --filter @immich/sdk build
 
+      - name: Install Chromium for the web unit tests
+        working-directory: upstream/web
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Run web unit tests
         working-directory: upstream/web
         run: |
