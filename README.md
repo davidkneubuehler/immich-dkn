@@ -24,6 +24,18 @@ machine-learning image and the mobile app are the official upstream releases.
 | --- | --- |
 | `ghcr.io/davidkneubuehler/immich-server:vX.Y.Z` | newest build for upstream `vX.Y.Z`; moves when the patches change |
 | `ghcr.io/davidkneubuehler/immich-server:dkn-vX.Y.Z-N` | revision `N` for upstream `vX.Y.Z`; never moves |
+| `ghcr.io/davidkneubuehler/immich-server:stable` | newest build for the newest upstream release; moves with each such release |
+
+`stable` lets a deployment follow the releases without naming a version. A
+release moves it only when it is built for the newest upstream release, so a
+rebuild (`dkn-vX.Y.Z-2` after `-1`) moves it and a manual build for an older
+upstream version leaves it alone. It points at the same signed digest as that
+release's `dkn-vX.Y.Z-N` tag, so the labels `org.opencontainers.image.version`
+and `org.opencontainers.image.revision` name the release and commit it
+currently stands for. The `dkn-vX.Y.Z-N` tags stay immutable; pin one of them,
+or the digest, where an update must be a deliberate change. With `stable`,
+keep the `immich-machine-learning` image on the matching upstream version
+yourself.
 
 Use the image in place of `ghcr.io/immich-app/immich-server` and keep the
 official `immich-machine-learning` image of the same version. Each image is
@@ -54,8 +66,9 @@ on manual dispatch (optionally for a given upstream version):
 4. Build the web app with upstream's own `server/Dockerfile` stage `web`
    (same Node, pnpm and lockfile as the official image), copy it over
    `/build/www` of the official image ([`Dockerfile`](Dockerfile),
-   [`docker-bake.hcl`](docker-bake.hcl)), push, sign, attest and create the
-   GitHub release.
+   [`docker-bake.hcl`](docker-bake.hcl)), push, sign and attest, point
+   `stable` at the pushed digest if the build is for the newest upstream
+   release, and create the GitHub release.
 
 Only runs on `main` push, release and report failures. A manual run on another
 branch stops after the checks and the E2E build.

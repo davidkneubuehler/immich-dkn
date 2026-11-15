@@ -3,6 +3,7 @@ name: Release
 # Builds immich-server for the newest upstream Immich release with patches/
 # applied to its web app, and publishes it as
 # ghcr.io/davidkneubuehler/immich-server:vX.Y.Z and :dkn-vX.Y.Z-N.
+# A build for the newest upstream release also moves :stable to its digest.
 # Upstream is checked out inside the run and never pushed anywhere.
 # Only runs on main publish: a dispatch on another branch applies the patches,
 # runs the checks and builds the image, but pushes and releases nothing.
@@ -46,6 +47,7 @@ jobs:
       packages: read
     outputs:
       version: ${{ steps.upstream.outputs.version }}
+      stable: ${{ steps.upstream.outputs.stable }}
       upstream_commit: ${{ steps.upstream.outputs.commit }}
       upstream_image: ${{ steps.image.outputs.image }}
       release_tag: ${{ steps.revision.outputs.release_tag }}
@@ -65,6 +67,8 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          # The latest release excludes drafts and prereleases.
+          newest=$(gh api "repos/$UPSTREAM_REPOSITORY/releases/latest" --jq .tag_name)
           if [ -n "$INPUT_VERSION" ]; then
             version=$INPUT_VERSION
             prerelease=$(gh api "repos/$UPSTREAM_REPOSITORY/releases/tags/$version" --jq .prerelease)
@@ -73,8 +77,7 @@ jobs:
               exit 1
             fi
           else
-            # The latest release excludes drafts and prereleases.
-            version=$(gh api "repos/$UPSTREAM_REPOSITORY/releases/latest" --jq .tag_name)
+            version=$newest
           fi
           if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error title=Upstream release::Unexpected release tag '$version'."
@@ -85,11 +88,18 @@ jobs:
             echo "::error title=Upstream release::Tag $version not found in $UPSTREAM_REPOSITORY."
             exit 1
           fi
+          # The stable tag follows only the newest upstream release, so a
+          # dispatch for an older version never moves it backwards.
+          stable=false
+          if [ "$version" = "$newest" ]; then
+            stable=true
+          fi
           {
             echo "version=$version"
             echo "commit=$commit"
+            echo "stable=$stable"
           } >> "$GITHUB_OUTPUT"
-          echo "Upstream $version: $commit" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Upstream $version: $commit (newest release: $newest)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -424,6 +434,22 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
+      # Retags the signed index without a rebuild, so stable has the same
+      # digest, signature, attestation and labels as the release tag.
+      - name: Move stable to the newest upstream release
+        if: needs.resolve.outputs.stable == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "$IMAGE:stable" "$IMAGE@$DIGEST"
+          moved=$(docker buildx imagetools inspect "$IMAGE:stable" --format '{{json .Manifest}}' | jq -re .digest)
+          if [ "$moved" != "$DIGEST" ]; then
+            echo "::error title=Stable tag::$IMAGE:stable is $moved, expected $DIGEST."
+            exit 1
+          fi
+          echo "Moved $IMAGE:stable to $RELEASE_TAG ($DIGEST)" | tee -a "$GITHUB_STEP_SUMMARY"
+
   release:
     name: Create GitHub release
     needs: [resolve, publish]
@@ -445,6 +471,7 @@ jobs:
           UPSTREAM_COMMIT: ${{ needs.resolve.outputs.upstream_commit }}
           UPSTREAM_IMAGE: ${{ needs.resolve.outputs.upstream_image }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          STABLE: ${{ needs.resolve.outputs.stable }}
           DIGEST: ${{ needs.publish.outputs.digest }}
           IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -457,6 +484,9 @@ jobs:
             echo
             echo "- \`$IMAGE:$VERSION\`"
             echo "- \`$IMAGE:$RELEASE_TAG\`"
+            if [ "$STABLE" = true ]; then
+              echo "- \`$IMAGE:stable\` (moves with the next release)"
+            fi
             echo "- Digest: \`$DIGEST\`"
             echo "- Built on: \`$UPSTREAM_IMAGE\`"
             echo "- Run: $RUN_URL"
